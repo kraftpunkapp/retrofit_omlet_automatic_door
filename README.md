@@ -6,7 +6,7 @@ Intégration Home Assistant possible via MQTT, interface web mobile embarquée, 
 
 Le projet peut fonctionner avec n'importe quel autre bricolage de porte DIY.
 
-![Capture d'écran de l'interface web](https://github.com/bonnoa/retrofit_omlet_automatic_door/blob/15a76a0ba2ad137b84e32b59a12258cbaffb4ce7/ePoule.png)
+![Capture d'écran de l'interface web](ePoule.png)
 ---
 
 ## Contexte
@@ -23,13 +23,14 @@ La porte coulisse **horizontalement** : droite → gauche pour ouvrir, gauche �
 ## Fonctionnalités
 
 - **4 modes de gestion** : soleil (calcul NOAA lever/coucher), luminosité (seuils lux + confirmation), heure fixe, manuel
-- **Intégration MQTT** via MQTT (broker Home Assistant par exemple)
+- **Intégration Home Assistant** via MQTT Discovery : les entités sont créées automatiquement
 - **Interface web mobile-first** embarquée sur l'ESP32 (WebSocket, temps réel)
 - **Sécurités** : fins de course magnétiques, détection surcourant (ACS712), timeout moteur
 - **Override manuel** : commande manuelle suspend l'automatisme jusqu'à la prochaine échéance
 - **Persistance des paramètres** : sauvegarde NVS Flash
 - **Heure été/hiver automatique** : fuseau horaire POSIX France (CET-1CEST,M3.5.0,M10.5.0/3)
 - **Démarrage progressif** : rampe PWM pour limiter le pic de courant
+- **Mise à jour sans fil (OTA)** : téléversement depuis l'IDE Arduino via le WiFi
 
 ---
 
@@ -71,10 +72,12 @@ Installer via le gestionnaire de bibliothèques Arduino :
 | Bibliothèque | Auteur |
 |---|---|
 | PubSubClient | Nick O'Leary |
-| ArduinoJson | Benoit Blanchon |
+| ArduinoJson (**v7**) | Benoit Blanchon |
 | BH1750 | Christopher Laws |
 | ESP Async WebServer | **ESP32Async** (github.com/ESP32Async/ESPAsyncWebServer) |
 | AsyncTCP | **ESP32Async** (github.com/ESP32Async/AsyncTCP) |
+
+> Package ESP32 Arduino **v3.x** requis (testé en 3.3.12). ArduinoOTA est inclus dans le package.
 
 > ⚠️ Utiliser les forks **ESP32Async** et non les dépôts originaux me-no-dev (archivés).
 
@@ -92,10 +95,19 @@ Paramètres de carte :
 | Board | ESP32 Dev Module |
 | Upload Speed | 921600 |
 | CPU Frequency | 240MHz (WiFi/BT) |
-| Flash Mode | DIO |
+| Flash Mode | QIO |
+| Flash Frequency | 80MHz |
 | Flash Size | 4MB (32Mb) |
-| Partition Scheme | DMinimal SPIFFS (1.9MB APP with OTA) |
+| Partition Scheme | Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS) |
 | PSRAM | Disabled |
+
+> Le schéma « Minimal SPIFFS » est nécessaire pour l'OTA : le programme occupe ~60 % des 1,9 Mo (il ne tient qu'à ~93 % dans le schéma par défaut).
+
+### Mise à jour sans fil (OTA)
+
+Après un premier téléversement par USB, les suivants peuvent se faire par le WiFi :
+dans l'IDE, **Outils → Port** → choisir le port réseau `poulailler` (ou l'IP de l'ESP32), puis Téléverser.
+Le moteur est coupé au début de la mise à jour et l'ESP32 redémarre à la fin : faire la mise à jour porte immobile.
 
 ---
 
@@ -203,8 +215,23 @@ ADDR → Non connecté (adresse 0x23)
 | `poulailler/capteurs/lux` | Publish | Float (lux) |
 | `poulailler/capteurs/courant` | Publish | Float (ampères) |
 | `poulailler/soleil/heures` | Publish | JSON lever/coucher/ouverture/fermeture |
+| `poulailler/porte/etat_texte` | Publish | État lisible (`Ouverte`, `Fermee`…) |
+| `poulailler/fdc/ouvert` · `poulailler/fdc/ferme` | Publish | `ON` / `OFF` |
+| `poulailler/status` | Publish (LWT) | `online` / `offline` |
+| `poulailler/wifi/rssi` · `poulailler/wifi/qualite` | Publish | dBm · % |
 | `poulailler/mode` | Pub/Sub | `soleil` / `luminosite` / `heure_fixe` / `manuel` |
 | `poulailler/config` | Subscribe | JSON de configuration complet |
+| `poulailler/param/<nom>` | Pub/Sub (retain) | `offset_ouv`, `offset_fer`, `lux_ouv`, `lux_fer`, `lux_conf`, `hfx_ouv_h`, `hfx_ouv_m`, `hfx_fer_h`, `hfx_fer_m` |
+
+Les valeurs reçues sont bornées (offsets soleil −60 à +120 min, heure fixe −120 à +120 min, confirmation lux 10 à 300 s…) et ne sont enregistrées que si elles changent.
+
+---
+
+## Home Assistant
+
+L'ESP32 déclare lui-même ses entités par **MQTT Discovery** (appareil « Porte Poulailler ») : porte (cover), mode (select), capteurs (luminosité, courant, heures soleil, WiFi, fins de course) et réglages (number). Elles passent en « indisponible » si l'ESP32 se déconnecte.
+
+Le fichier `home_assistant_poulailler_v2.yaml` est un **complément facultatif** : capteurs dérivés (lever/coucher…), alertes (erreur porte, ESP32 hors ligne, porte ouverte la nuit, surcourant) et exemple de tableau de bord. Il ne redéclare pas les entités MQTT, pour éviter les conflits d'`unique_id`.
 
 ---
 
@@ -214,10 +241,10 @@ ADDR → Non connecté (adresse 0x23)
 Calcul astronomique NOAA embarqué. Ouvre après le lever + offset, ferme après le coucher + offset. Offsets configurables de −60 à +120 minutes.
 
 ### Mode Luminosité
-Ouvre si luminosité > seuil pendant une durée de confirmation (évite les fausses détections nuageuses). Ferme si luminosité < seuil pendant la même durée.
+Ouvre si luminosité > seuil pendant une durée de confirmation (évite les fausses détections nuageuses). Ferme si luminosité < seuil pendant la même durée (10 à 300 s).
 
 ### Mode Heure Fixe
-Heures d'ouverture et fermeture définies manuellement, avec offsets optionnels.
+Heures d'ouverture et fermeture définies manuellement, avec offsets optionnels (−120 à +120 min). Une plage qui passe minuit est gérée.
 
 ### Mode Manuel
 Aucune automatisation. Commandes uniquement via interface web ou MQTT.
@@ -248,8 +275,10 @@ IP visible au démarrage de l'ESP32 dans le moniteur Arduino.
 | Fins de course | FDC atteint pendant mouvement | Arrêt immédiat |
 | Timeout ouverture | FDC non atteint après 15s | Arrêt + état ERREUR |
 | Timeout fermeture | FDC non atteint après 20s | Arrêt + état ERREUR |
-| Surcourant ACS712 | Courant > seuil (~2.7A) | Arrêt + état ERREUR |
+| Surcourant ACS712 | Courant > seuil (~2.7A) sur 3 mesures consécutives, après 500 ms de masquage du pic de démarrage | Arrêt + état ERREUR |
 | Garde universelle | Moteur actif hors mouvement | PWM forcé à 0 |
+
+Pendant un mouvement, la boucle principale ne fait aucun appel bloquant (pas de reconnexion MQTT, heure lue sans attente) : les fins de course sont lues toutes les ~10-20 ms. Un changement de mode demandé pendant un mouvement est appliqué dès l'arrêt de la porte.
 
 En état ERREUR : bouton **Réinitialiser** dans l'interface ou commande MQTT `RESET` sur `poulailler/porte/commande`.
 
@@ -290,7 +319,10 @@ void loop() {
 | `[BH1750] Device is not configured!` | Vérifier SDA→21, SCL→22, VCC→3.3V, GND |
 | ESP32 reboot au démarrage moteur | Ajouter condensateur 470µF sur sortie 5V LM2596S, ou alimenter l'ESP32 via USB indépendant |
 | Surcourant intempestif | Recalibrer ACS712_ZERO_ADC avec sketch de test |
-| Boucle MQTT sur le mode | Purger le retain : publier payload vide sur `poulailler/mode` dans HA |
+| Le mode revient tout seul | Purger un ancien retain : publier un payload vide (retain) sur `poulailler/mode` dans HA |
+| Entités HA en double / conflit `unique_id` | Retirer l'ancien bloc `mqtt:` de `configuration.yaml` : les entités viennent de la Discovery |
+| `secrets.h: No such file or directory` | Créer `secrets.h` à partir de `secrets.h.example` |
+| Port réseau `poulailler` absent dans l'IDE | Vérifier que l'ESP32 est sur le même réseau ; à défaut, téléverser par USB |
 | `[INIT] Position inconnue` | Déplacer la porte sur un FDC manuellement puis redémarrer |
 | Interface web inaccessible | Vérifier l'IP dans le moniteur série (115200 bauds) |
 
@@ -333,13 +365,14 @@ The door slides **horizontally**: right → left to open, left → right to clos
 ## Features
 
 - **4 management modes**: sun (NOAA sunrise/sunset calculation), luminosity (lux thresholds + confirmation delay), fixed time, manual
-- **Home Assistant integration** via MQTT (HA broker)
+- **Home Assistant integration** via MQTT Discovery: entities are created automatically
 - **Embedded mobile-first web interface** on the ESP32 (WebSocket, real-time)
 - **Safety systems**: magnetic limit switches, overcurrent detection (ACS712), motor timeout, universal guard
 - **Manual override**: a manual command temporarily suspends automation until the next scheduled event
 - **Parameter persistence**: NVS Flash storage, survives reboots
 - **Automatic DST handling**: POSIX timezone string for France (CET-1CEST,M3.5.0,M10.5.0/3)
 - **Soft motor start**: PWM ramp to limit inrush current
+- **Over-the-air updates (OTA)**: upload from the Arduino IDE over WiFi
 
 ---
 
@@ -382,10 +415,12 @@ Install via the Arduino Library Manager:
 | Library | Author |
 |---|---|
 | PubSubClient | Nick O'Leary |
-| ArduinoJson | Benoit Blanchon |
+| ArduinoJson (**v7**) | Benoit Blanchon |
 | BH1750 | Christopher Laws |
 | ESP Async WebServer | **ESP32Async** (github.com/ESP32Async/ESPAsyncWebServer) |
 | AsyncTCP | **ESP32Async** (github.com/ESP32Async/AsyncTCP) |
+
+> ESP32 Arduino core **v3.x** required (tested with 3.3.12). ArduinoOTA ships with the core.
 
 > ⚠️ Use the **ESP32Async** forks — the original me-no-dev repositories are archived.
 
@@ -403,10 +438,19 @@ Board settings:
 | Board | ESP32 Dev Module |
 | Upload Speed | 921600 |
 | CPU Frequency | 240MHz (WiFi/BT) |
-| Flash Mode | DIO |
+| Flash Mode | QIO |
+| Flash Frequency | 80MHz |
 | Flash Size | 4MB (32Mb) |
-| Partition Scheme | Minimal SPIFFS (1.9MB APP with OTA) |
+| Partition Scheme | Minimal SPIFFS (1.9MB APP with OTA/128KB SPIFFS) |
 | PSRAM | Disabled |
+
+> The "Minimal SPIFFS" scheme is required for OTA: the sketch uses ~60% of the 1.9 MB (it only fits at ~93% with the default scheme).
+
+### Over-the-air updates (OTA)
+
+After a first USB upload, later uploads can go over WiFi:
+in the IDE, **Tools → Port** → pick the `poulailler` network port (or the ESP32 IP), then Upload.
+The motor is switched off when the update starts and the ESP32 reboots at the end: update while the door is idle.
 
 ---
 
@@ -440,6 +484,7 @@ WiFi / MQTT credentials and GPS coordinates are **not** in the code: they are re
 ### Other parameters in `porte_poulailler.ino`
 
 ```cpp
+#define MQTT_ENABLED  true   // true = MQTT active, false = disabled
 const int   MQTT_PORT = 1883;
 const char* TZ_INFO   = "CET-1CEST,M3.5.0,M10.5.0/3";  // Time zone (France)
 ```
@@ -447,8 +492,6 @@ const char* TZ_INFO   = "CET-1CEST,M3.5.0,M10.5.0/3";  // Time zone (France)
 ### Parameters to calibrate after assembly
 
 ```cpp
-#define MQTT_ENABLED      true   // true = MQTT active, false = disabled
-
 #define ACS712_ZERO_ADC   3050   // ADC value at 0A — measure with motor stopped
 #define ACS712_SEUIL_ADC  310    // Delta triggering overcurrent (~2.7A)
 #define PWM_DUTY_9V       191    // Opening duty cycle (~9V on 12V supply)
@@ -515,8 +558,23 @@ ADDR → Not connected (address 0x23)
 | `poulailler/capteurs/lux` | Publish | Float (lux) |
 | `poulailler/capteurs/courant` | Publish | Float (amperes) |
 | `poulailler/soleil/heures` | Publish | JSON sunrise/sunset/opening/closing times |
+| `poulailler/porte/etat_texte` | Publish | Human-readable state (`Ouverte`, `Fermee`…) |
+| `poulailler/fdc/ouvert` · `poulailler/fdc/ferme` | Publish | `ON` / `OFF` |
+| `poulailler/status` | Publish (LWT) | `online` / `offline` |
+| `poulailler/wifi/rssi` · `poulailler/wifi/qualite` | Publish | dBm · % |
 | `poulailler/mode` | Pub/Sub | `soleil` / `luminosite` / `heure_fixe` / `manuel` |
 | `poulailler/config` | Subscribe | Full configuration JSON |
+| `poulailler/param/<name>` | Pub/Sub (retain) | `offset_ouv`, `offset_fer`, `lux_ouv`, `lux_fer`, `lux_conf`, `hfx_ouv_h`, `hfx_ouv_m`, `hfx_fer_h`, `hfx_fer_m` |
+
+Incoming values are clamped (sun offsets −60 to +120 min, fixed-time offsets −120 to +120 min, lux confirmation 10 to 300 s…) and only saved when they change.
+
+---
+
+## Home Assistant
+
+The ESP32 declares its own entities via **MQTT Discovery** ("Porte Poulailler" device): door (cover), mode (select), sensors (luminosity, current, sun times, WiFi, limit switches) and settings (number). They become "unavailable" when the ESP32 disconnects.
+
+`home_assistant_poulailler_v2.yaml` is an **optional add-on**: derived sensors (sunrise/sunset…), alerts (door error, ESP32 offline, door open at night, overcurrent) and a sample dashboard. It does not redeclare the MQTT entities, to avoid `unique_id` conflicts.
 
 ---
 
@@ -526,10 +584,10 @@ ADDR → Not connected (address 0x23)
 Embedded NOAA astronomical calculation. Opens after sunrise + offset, closes after sunset + offset. Offsets configurable from −60 to +120 minutes.
 
 ### Luminosity Mode
-Opens if brightness > threshold for a confirmation duration (avoids false triggers from clouds). Closes if brightness < threshold for the same duration.
+Opens if brightness > threshold for a confirmation duration (avoids false triggers from clouds). Closes if brightness < threshold for the same duration (10 to 300 s).
 
 ### Fixed Time Mode
-Manually defined opening and closing times, with optional offsets.
+Manually defined opening and closing times, with optional offsets (−120 to +120 min). A range spanning midnight is supported.
 
 ### Manual Mode
 No automation. Commands only via web interface or MQTT.
@@ -559,8 +617,10 @@ Accessible at `http://[ESP32_IP]` from any browser on the local network.
 | Limit switches | Limit switch reached during movement | Immediate stop |
 | Opening timeout | Limit switch not reached after 15s | Stop + ERROR state |
 | Closing timeout | Limit switch not reached after 20s | Stop + ERROR state |
-| ACS712 overcurrent | Current > threshold (~2.7A) | Stop + ERROR state |
+| ACS712 overcurrent | Current > threshold (~2.7A) on 3 consecutive readings, after a 500 ms start-up blanking | Stop + ERROR state |
 | Universal guard | Motor active outside movement state | PWM forced to 0 |
+
+While moving, the main loop makes no blocking call (no MQTT reconnection, non-blocking clock read): limit switches are polled every ~10-20 ms. A mode change requested during a movement is applied as soon as the door stops.
 
 In ERROR state: **Reset** button in the web interface or MQTT command `RESET` on `poulailler/porte/commande`.
 
@@ -601,7 +661,10 @@ void loop() {
 | `[BH1750] Device is not configured!` | Check SDA→21, SCL→22, VCC→3.3V, GND |
 | ESP32 reboots at motor start | Add 470µF capacitor on LM2596S 5V output, or power ESP32 via independent USB charger |
 | Spurious overcurrent detection | Recalibrate ACS712_ZERO_ADC with test sketch |
-| MQTT mode loop | Clear retain: publish empty payload on `poulailler/mode` in HA Dev Tools |
+| Mode keeps reverting | Clear an old retain: publish an empty retained payload on `poulailler/mode` in HA Dev Tools |
+| Duplicate HA entities / `unique_id` conflict | Remove the old `mqtt:` block from `configuration.yaml`: entities come from Discovery |
+| `secrets.h: No such file or directory` | Create `secrets.h` from `secrets.h.example` |
+| `poulailler` network port missing in the IDE | Make sure the ESP32 is on the same network; otherwise upload over USB |
 | `[INIT] Position inconnue` | Manually move door onto a limit switch then reboot |
 | Web interface unreachable | Check IP in serial monitor (115200 baud) |
 
