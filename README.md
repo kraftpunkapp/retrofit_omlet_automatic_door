@@ -6,7 +6,12 @@ Intégration Home Assistant possible via MQTT, interface web mobile embarquée, 
 
 Le projet peut fonctionner avec n'importe quel autre bricolage de porte DIY.
 
-![Capture d'écran de l'interface web](ePoule.png)
+<p align="center">
+  <img src="docs/interface-porte-fermee-soleil.png" alt="Interface web : porte fermée, mode Soleil" width="31%">
+  <img src="docs/interface-ouverture-luminosite.png" alt="Interface web : ouverture en cours, mode Luminosité" width="31%">
+  <img src="docs/interface-erreur-heure-fixe.png" alt="Interface web : erreur, mode Heure fixe" width="31%">
+</p>
+
 ---
 
 ## Contexte
@@ -250,7 +255,7 @@ Heures d'ouverture et fermeture définies manuellement, avec offsets optionnels 
 Aucune automatisation. Commandes uniquement via interface web ou MQTT.
 
 ### Override manuel
-En modes automatiques, une commande manuelle suspend l'automatisme jusqu'à la prochaine échéance naturelle (lever/coucher ou 30 min en mode luminosité). Un badge violet s'affiche dans l'interface.
+En modes automatiques, une commande manuelle suspend l'automatisme jusqu'à la prochaine échéance naturelle (lever/coucher ou 30 min en mode luminosité). Un badge jaune s'affiche dans l'interface.
 
 ---
 
@@ -593,7 +598,7 @@ Manually defined opening and closing times, with optional offsets (−120 to +12
 No automation. Commands only via web interface or MQTT.
 
 ### Manual Override
-In automatic modes, a manual command suspends automation until the next natural event (sunrise/sunset or 30 minutes in luminosity mode). A purple badge appears in the interface.
+In automatic modes, a manual command suspends automation until the next natural event (sunrise/sunset or 30 minutes in luminosity mode). A yellow badge appears in the interface.
 
 ---
 
