@@ -57,16 +57,19 @@ void publishHeuresSoleil();
 // ============================================================
 #define MQTT_ENABLED  true   // true = MQTT actif, false = désactivé
 
-const char* WIFI_SSID     = "TON_SSID"; // Your WIFI SSID
-const char* WIFI_PASSWORD = "TON_MOT_DE_PASSE"; // Your Paswword
+// Identifiants et position dans secrets.h (non publié — voir secrets.h.example)
+#include "secrets.h"
 
-const char* MQTT_SERVER   = "192.168.1.XX";  // IP du broker MQTT // IP MQTT broker
+const char* WIFI_SSID     = SECRET_WIFI_SSID;
+const char* WIFI_PASSWORD = SECRET_WIFI_PASSWORD;
+
+const char* MQTT_SERVER   = SECRET_MQTT_SERVER;
 const int   MQTT_PORT     = 1883;
-const char* MQTT_USER     = "mqtt_user";
-const char* MQTT_PASS     = "mqtt_password";
+const char* MQTT_USER     = SECRET_MQTT_USER;
+const char* MQTT_PASS     = SECRET_MQTT_PASS;
 
-const float LATITUDE      = 48.8566;  // Coordonnées GPS pour calcul soleil // Door ckicken GPS location 
-const float LONGITUDE     = 2.3522;
+const float LATITUDE      = SECRET_LATITUDE;
+const float LONGITUDE     = SECRET_LONGITUDE;
 
 const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";  // France — heure été/hiver automatique // Winter/Summer timer France by default
 

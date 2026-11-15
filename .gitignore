@@ -1,0 +1,10 @@
+# Identifiants WiFi / MQTT — ne jamais publier
+porte_poulailler/secrets.h
+
+# macOS
+.DS_Store
+
+# Fichiers de travail locaux (non publiés)
+web_preview_v2.html
+guide_cablage_poulailler.docx
+tests/
