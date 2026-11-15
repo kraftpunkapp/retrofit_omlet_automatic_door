@@ -768,6 +768,13 @@ void wsBroadcastState() {
   float lux = bh1750.readLightLevel();
   float amp = lireCourant();
 
+  // Avancement de la confirmation luminosité (barre « Détection ») : 0 à 100 %
+  int confPct = 0;
+  if (modeActuel == MODE_LUMINOSITE && conditionLuxActive && luxConfirmationSec > 0) {
+    unsigned long ecoule = millis() - debutConditionLux;
+    confPct = (int)min(100UL, ecoule * 100UL / ((unsigned long)luxConfirmationSec * 1000UL));
+  }
+
   char heureStr[6];
   if (heureOk) snprintf(heureStr, sizeof(heureStr), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
   else         snprintf(heureStr, sizeof(heureStr), "--:--");
@@ -791,6 +798,7 @@ void wsBroadcastState() {
     "\"hfx_fer_h\":%d,\"hfx_fer_m\":%d,\"hfx_fer_off\":%d,"
     "\"lux\":%.0f,"
     "\"courant\":%.2f,"
+    "\"conf_pct\":%d,"
     "\"force_manuel\":%s,"
     "\"rssi\":%d,"
     "\"fdc_ouv\":%s,"
@@ -813,6 +821,7 @@ void wsBroadcastState() {
     heureFixeFerH, heureFixeFerM, offsetFixeFer,
     lux,
     amp,
+    confPct,
     forceManuel ? "true" : "false",
     (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0,
     digitalRead(PIN_FDC_OUV) == LOW  ? "true" : "false",
