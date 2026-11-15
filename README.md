@@ -57,7 +57,9 @@ La porte coulisse **horizontalement** : droite → gauche pour ouvrir, gauche �
 ```
 porte_poulailler/
 ├── porte_poulailler.ino   ← Logique principale (moteur, modes, MQTT, NVS)
-└── web_server_v2.ino      ← Serveur web + WebSocket + HTML embarqué
+├── web_server_v2.ino      ← Serveur web + WebSocket + HTML embarqué
+├── secrets.h.example      ← Modèle des identifiants (publié)
+└── secrets.h              ← Tes identifiants (à créer, ignoré par git)
 ```
 
 > Les deux fichiers `.ino` doivent être dans le même dossier. L'IDE Arduino les compile automatiquement ensemble.
@@ -99,21 +101,37 @@ Paramètres de carte :
 
 ## Configuration
 
-### Paramètres obligatoires dans `porte_poulailler.ino`
+### Identifiants et position : `secrets.h`
+
+Les identifiants WiFi / MQTT et les coordonnées GPS ne sont **pas** dans le code : ils sont lus depuis `porte_poulailler/secrets.h`, un fichier ignoré par git pour ne jamais publier tes mots de passe.
+
+1. Copier le modèle :
+   ```bash
+   cp porte_poulailler/secrets.h.example porte_poulailler/secrets.h
+   ```
+2. Renseigner tes valeurs dans `secrets.h` :
+   ```cpp
+   #define SECRET_WIFI_SSID      "TON_SSID"
+   #define SECRET_WIFI_PASSWORD  "TON_MOT_DE_PASSE"
+
+   #define SECRET_MQTT_SERVER    "192.168.1.XX"   // IP du broker Home Assistant
+   #define SECRET_MQTT_USER      "mqtt_user"
+   #define SECRET_MQTT_PASS      "mqtt_password"
+
+   #define SECRET_LATITUDE       48.8566          // Coordonnées GPS pour calcul soleil
+   #define SECRET_LONGITUDE      2.3522
+   ```
+3. Compiler normalement : `secrets.h` apparaît comme un onglet dans l'IDE Arduino.
+
+> Sans `secrets.h`, la compilation échoue avec `secrets.h: No such file or directory`.
+> Ne jamais committer `secrets.h` (il est listé dans `.gitignore`) ; seul `secrets.h.example` est publié.
+
+### Autres paramètres dans `porte_poulailler.ino`
 
 ```cpp
 #define MQTT_ENABLED  true   // true = MQTT actif, false = désactivé
-
-const char* WIFI_SSID     = "TON_SSID";
-const char* WIFI_PASSWORD = "TON_MOT_DE_PASSE";
-
-const char* MQTT_SERVER   = "192.168.1.XX";  // IP du broker Home Assistant
-const int   MQTT_PORT     = 1883;
-const char* MQTT_USER     = "mqtt_user";
-const char* MQTT_PASS     = "mqtt_password";
-
-const float LATITUDE      = 48.8566;  // Coordonnées GPS pour calcul soleil
-const float LONGITUDE     = 2.3522;
+const int   MQTT_PORT = 1883;
+const char* TZ_INFO   = "CET-1CEST,M3.5.0,M10.5.0/3";  // Fuseau horaire (France)
 ```
 
 ### Paramètres à calibrer après montage
@@ -126,6 +144,8 @@ const float LONGITUDE     = 2.3522;
 #define TIMEOUT_OUV_MS    15000 // Timeout ouverture en ms
 #define TIMEOUT_FER_MS    20000 // Timeout fermeture en ms
 #define RAMPE_MS          300   // Durée rampe PWM démarrage moteur
+#define SURCOURANT_MASQUAGE_MS    500  // Pic de démarrage ignoré après la rampe
+#define SURCOURANT_CONFIRMATIONS  3    // Mesures consécutives avant arrêt
 ```
 
 ---
@@ -348,7 +368,9 @@ The door slides **horizontally**: right → left to open, left → right to clos
 ```
 porte_poulailler/
 ├── porte_poulailler.ino   ← Main logic (motor, modes, MQTT, NVS)
-└── web_server_v2.ino      ← Web server + WebSocket + embedded HTML
+├── web_server_v2.ino      ← Web server + WebSocket + embedded HTML
+├── secrets.h.example      ← Credentials template (published)
+└── secrets.h              ← Your credentials (to create, git-ignored)
 ```
 
 > Both `.ino` files must be in the same folder. The Arduino IDE compiles them together automatically.
@@ -390,19 +412,36 @@ Board settings:
 
 ## Configuration
 
-### Required parameters in `porte_poulailler.ino`
+### Credentials and location: `secrets.h`
+
+WiFi / MQTT credentials and GPS coordinates are **not** in the code: they are read from `porte_poulailler/secrets.h`, a git-ignored file so your passwords are never published.
+
+1. Copy the template:
+   ```bash
+   cp porte_poulailler/secrets.h.example porte_poulailler/secrets.h
+   ```
+2. Fill in your values in `secrets.h`:
+   ```cpp
+   #define SECRET_WIFI_SSID      "YOUR_SSID"
+   #define SECRET_WIFI_PASSWORD  "YOUR_PASSWORD"
+
+   #define SECRET_MQTT_SERVER    "192.168.1.XX"   // Home Assistant broker IP
+   #define SECRET_MQTT_USER      "mqtt_user"
+   #define SECRET_MQTT_PASS      "mqtt_password"
+
+   #define SECRET_LATITUDE       48.8566          // GPS coordinates for sun calculation
+   #define SECRET_LONGITUDE      2.3522
+   ```
+3. Compile as usual: `secrets.h` shows up as a tab in the Arduino IDE.
+
+> Without `secrets.h`, compilation fails with `secrets.h: No such file or directory`.
+> Never commit `secrets.h` (it is listed in `.gitignore`); only `secrets.h.example` is published.
+
+### Other parameters in `porte_poulailler.ino`
 
 ```cpp
-const char* WIFI_SSID     = "YOUR_SSID";
-const char* WIFI_PASSWORD = "YOUR_PASSWORD";
-
-const char* MQTT_SERVER   = "192.168.1.XX";  // Home Assistant broker IP
-const int   MQTT_PORT     = 1883;
-const char* MQTT_USER     = "mqtt_user";
-const char* MQTT_PASS     = "mqtt_password";
-
-const float LATITUDE      = 48.8566;  // GPS coordinates for sun calculation
-const float LONGITUDE     = 2.3522;
+const int   MQTT_PORT = 1883;
+const char* TZ_INFO   = "CET-1CEST,M3.5.0,M10.5.0/3";  // Time zone (France)
 ```
 
 ### Parameters to calibrate after assembly
@@ -417,6 +456,8 @@ const float LONGITUDE     = 2.3522;
 #define TIMEOUT_OUV_MS    15000  // Opening timeout in ms
 #define TIMEOUT_FER_MS    20000  // Closing timeout in ms
 #define RAMPE_MS          300    // PWM ramp duration at motor start
+#define SURCOURANT_MASQUAGE_MS    500  // Start-up spike ignored after the ramp
+#define SURCOURANT_CONFIRMATIONS  3    // Consecutive readings before stopping
 ```
 
 ---
