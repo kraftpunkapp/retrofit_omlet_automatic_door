@@ -1,70 +1,27 @@
 # ============================================================
 #  HOME ASSISTANT — Porte Poulailler Automatique v2
 #  À ajouter dans configuration.yaml
+#
+#  Les entités MQTT (porte, mode, capteurs, réglages) sont créées
+#  AUTOMATIQUEMENT par l'ESP32 via MQTT Discovery (appareil
+#  « Porte Poulailler »). Ne pas les redéclarer ici : mêmes unique_id
+#  → conflit dans HA.
+#
+#  Ce fichier ne contient que des compléments : capteurs dérivés,
+#  automatisations d'alerte et un exemple de tableau de bord.
+#
+#  Identifiants d'entités créés par la Discovery (à vérifier dans
+#  Paramètres → Appareils → Porte Poulailler, ils peuvent différer
+#  si tu les as renommés) :
+#    cover.porte_poulailler_porte
+#    select.porte_poulailler_mode
+#    sensor.porte_poulailler_heures_soleil
+#    sensor.porte_poulailler_luminosite
+#    sensor.porte_poulailler_courant_moteur
+#    number.porte_poulailler_offset_ouverture / _fermeture
+#    number.porte_poulailler_seuil_lux_ouverture / _fermeture
+#    number.porte_poulailler_confirmation_luminosite
 # ============================================================
-
-# ── MQTT Cover (porte) ──────────────────────────────────────
-mqtt:
-  cover:
-    - name: "Porte Poulailler"
-      unique_id: poulailler_porte
-      command_topic: "poulailler/porte/commande"
-      state_topic: "poulailler/porte/etat"
-      payload_open: "OPEN"
-      payload_close: "CLOSE"
-      payload_stop: "STOP"
-      state_open: "open"
-      state_closed: "closed"
-      state_opening: "opening"
-      state_closing: "closing"
-      optimistic: false
-      device_class: gate
-      icon: mdi:door-sliding
-
-  sensor:
-    - name: "Luminosité Poulailler"
-      unique_id: poulailler_lux
-      state_topic: "poulailler/capteurs/lux"
-      unit_of_measurement: "lx"
-      device_class: illuminance
-      icon: mdi:weather-sunny
-
-    - name: "Courant Moteur Poulailler"
-      unique_id: poulailler_courant
-      state_topic: "poulailler/capteurs/courant"
-      unit_of_measurement: "A"
-      device_class: current
-      icon: mdi:current-ac
-
-    - name: "Heures Soleil Poulailler"
-      unique_id: poulailler_soleil
-      state_topic: "poulailler/soleil/heures"
-      value_template: "{{ value_json.ouverture }} / {{ value_json.fermeture }}"
-      json_attributes_topic: "poulailler/soleil/heures"
-      json_attributes_template: "{{ value_json | tojson }}"
-      icon: mdi:weather-sunset
-
-  select:
-    - name: "Mode Porte Poulailler"
-      unique_id: poulailler_mode
-      command_topic: "poulailler/mode"
-      state_topic: "poulailler/mode"
-      options:
-        - "soleil"
-        - "luminosite"
-        - "heure_fixe"
-        - "manuel"
-      icon: mdi:cog
-
-  # ── Envoi de la configuration complète via un seul topic JSON ──
-  # Utiliser le service mqtt.publish depuis HA pour envoyer :
-  # topic: poulailler/config
-  # payload: {"offset_ouv":15,"offset_fer":-10}
-  # Les clés disponibles :
-  #   offset_ouv, offset_fer               (mode soleil)
-  #   lux_ouv, lux_fer, lux_conf           (mode luminosité)
-  #   hfx_ouv_h, hfx_ouv_m, hfx_ouv_off   (mode heure fixe ouverture)
-  #   hfx_fer_h, hfx_fer_m, hfx_fer_off   (mode heure fixe fermeture)
 
 # ── Template sensors ────────────────────────────────────────
 template:
@@ -72,32 +29,32 @@ template:
       - name: "Lever Soleil Poulailler"
         unique_id: poulailler_lever
         state: >
-          {{ state_attr('sensor.heures_soleil_poulailler', 'lever') | default('--:--') }}
+          {{ state_attr('sensor.porte_poulailler_heures_soleil', 'lever') | default('--:--') }}
         icon: mdi:weather-sunset-up
 
       - name: "Coucher Soleil Poulailler"
         unique_id: poulailler_coucher
         state: >
-          {{ state_attr('sensor.heures_soleil_poulailler', 'coucher') | default('--:--') }}
+          {{ state_attr('sensor.porte_poulailler_heures_soleil', 'coucher') | default('--:--') }}
         icon: mdi:weather-sunset-down
 
       - name: "Heure Ouverture Poulailler"
         unique_id: poulailler_heure_ouv
         state: >
-          {{ state_attr('sensor.heures_soleil_poulailler', 'ouverture') | default('--:--') }}
+          {{ state_attr('sensor.porte_poulailler_heures_soleil', 'ouverture') | default('--:--') }}
         icon: mdi:door-sliding-open
 
       - name: "Heure Fermeture Poulailler"
         unique_id: poulailler_heure_fer
         state: >
-          {{ state_attr('sensor.heures_soleil_poulailler', 'fermeture') | default('--:--') }}
+          {{ state_attr('sensor.porte_poulailler_heures_soleil', 'fermeture') | default('--:--') }}
         icon: mdi:door-sliding
 
       # Mode en cours formaté lisiblement
       - name: "Mode Poulailler Lisible"
         unique_id: poulailler_mode_lisible
         state: >
-          {% set m = states('select.mode_porte_poulailler') %}
+          {% set m = states('select.porte_poulailler_mode') %}
           {% if m == 'soleil' %}🌅 Lever/coucher du soleil
           {% elif m == 'luminosite' %}💡 Luminosité
           {% elif m == 'heure_fixe' %}🕐 Heure fixe
@@ -106,9 +63,10 @@ template:
           {% endif %}
 
 # ── Automatisations ─────────────────────────────────────────
+# (une seule clé « automation: » — une clé en double est ignorée par HA)
 automation:
 
-  # Alerte erreur porte
+  # Alerte erreur porte (timeout, surintensité, position inconnue)
   - id: poulailler_alerte_erreur
     alias: "Poulailler — Alerte erreur porte"
     trigger:
@@ -123,6 +81,19 @@ automation:
             Erreur porte poulailler — vérifier l'installation.
             Heure : {{ now().strftime('%H:%M') }}
 
+  # Alerte ESP32 hors ligne (LWT MQTT)
+  - id: poulailler_alerte_hors_ligne
+    alias: "Poulailler — ESP32 hors ligne"
+    trigger:
+      - platform: mqtt
+        topic: "poulailler/status"
+        payload: "offline"
+    action:
+      - service: notify.mobile_app
+        data:
+          title: "📡 Poulailler"
+          message: "Le contrôleur de la porte ne répond plus (WiFi/MQTT)."
+
   # Alerte porte ouverte la nuit
   - id: poulailler_alerte_nuit_ouverte
     alias: "Poulailler — Porte ouverte la nuit"
@@ -131,7 +102,7 @@ automation:
         at: "23:00:00"
     condition:
       - condition: state
-        entity_id: cover.porte_poulailler
+        entity_id: cover.porte_poulailler_porte
         state: "open"
     action:
       - service: notify.mobile_app
@@ -139,12 +110,12 @@ automation:
           title: "🐔 Poulailler"
           message: "La porte est encore ouverte à 23h !"
 
-  # Alerte surcourant (courant moteur > 2 A hors mouvement normal)
+  # Alerte surcourant (courant moteur > 2 A)
   - id: poulailler_alerte_surcourant
     alias: "Poulailler — Alerte surcourant moteur"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.courant_moteur_poulailler
+        entity_id: sensor.porte_poulailler_courant_moteur
         above: 2.0
         for:
           seconds: 5
@@ -153,100 +124,18 @@ automation:
         data:
           title: "⚡ Poulailler"
           message: >
-            Surcourant détecté : {{ states('sensor.courant_moteur_poulailler') }} A
+            Surcourant détecté : {{ states('sensor.porte_poulailler_courant_moteur') }} A
             La porte a été arrêtée automatiquement.
 
-  # Basculer en mode manuel si HA perd la connexion MQTT
-  # (optionnel — l'ESP32 continue de fonctionner en autonome)
-  - id: poulailler_mode_auto_reprise
-    alias: "Poulailler — Reprendre mode soleil au démarrage HA"
-    trigger:
-      - platform: homeassistant
-        event: start
-    action:
-      - delay: "00:00:30"   # laisser le temps à MQTT de se reconnecter
-      - service: mqtt.publish
-        data:
-          topic: "poulailler/mode"
-          payload: "soleil"
-          retain: true
-
-# ── Helpers (input_number pour configurer depuis l'UI HA) ───
-# À ajouter dans configuration.yaml ou dans des fichiers séparés
-input_number:
-  poulailler_offset_ouv:
-    name: "Décalage ouverture (min)"
-    min: -60
-    max: 120
-    step: 5
-    unit_of_measurement: "min"
-    icon: mdi:timer-plus-outline
-
-  poulailler_offset_fer:
-    name: "Décalage fermeture (min)"
-    min: -60
-    max: 120
-    step: 5
-    unit_of_measurement: "min"
-    icon: mdi:timer-minus-outline
-
-  poulailler_lux_seuil_ouv:
-    name: "Seuil luminosité ouverture (lx)"
-    min: 100
-    max: 2000
-    step: 50
-    unit_of_measurement: "lx"
-    icon: mdi:weather-sunny
-
-  poulailler_lux_seuil_fer:
-    name: "Seuil luminosité fermeture (lx)"
-    min: 10
-    max: 500
-    step: 10
-    unit_of_measurement: "lx"
-    icon: mdi:weather-night
-
-  poulailler_lux_confirmation:
-    name: "Durée confirmation luminosité (s)"
-    min: 10
-    max: 300
-    step: 10
-    unit_of_measurement: "s"
-    icon: mdi:timer-outline
-
-# ── Automatisation : envoi config quand les sliders HA changent
-automation:
-  - id: poulailler_sync_config_offsets
-    alias: "Poulailler — Sync offsets vers ESP32"
-    trigger:
-      - platform: state
-        entity_id:
-          - input_number.poulailler_offset_ouv
-          - input_number.poulailler_offset_fer
-    action:
-      - service: mqtt.publish
-        data:
-          topic: "poulailler/config"
-          payload: >
-            {"offset_ouv": {{ states('input_number.poulailler_offset_ouv') | int }},
-             "offset_fer": {{ states('input_number.poulailler_offset_fer') | int }}}
-
-  - id: poulailler_sync_config_lux
-    alias: "Poulailler — Sync seuils lux vers ESP32"
-    trigger:
-      - platform: state
-        entity_id:
-          - input_number.poulailler_lux_seuil_ouv
-          - input_number.poulailler_lux_seuil_fer
-          - input_number.poulailler_lux_confirmation
-    action:
-      - service: mqtt.publish
-        data:
-          topic: "poulailler/config"
-          payload: >
-            {"lux_ouv": {{ states('input_number.poulailler_lux_seuil_ouv') | int }},
-             "lux_fer": {{ states('input_number.poulailler_lux_seuil_fer') | int }},
-             "lux_conf": {{ states('input_number.poulailler_lux_confirmation') | int }}}
+# ── Envoi de la configuration complète via un seul topic JSON ──
+# Optionnel (les réglages sont déjà exposés en entités « number ») :
+# service mqtt.publish, topic: poulailler/config
+# payload: {"offset_ouv":15,"offset_fer":-10}
+# Clés disponibles :
+#   offset_ouv, offset_fer               (mode soleil, -60 à 120 min)
+#   lux_ouv, lux_fer, lux_conf           (mode luminosité, lux_conf 10 à 300 s)
+#   hfx_ouv_h, hfx_ouv_m, hfx_ouv_off   (mode heure fixe ouverture, offset -120 à 120)
+#   hfx_fer_h, hfx_fer_m, hfx_fer_off   (mode heure fixe fermeture)
 
 # ── Dashboard Lovelace ──────────────────────────────────────
 # views:
@@ -255,18 +144,18 @@ automation:
 #       - type: entities
 #         title: Porte Poulailler
 #         entities:
-#           - cover.porte_poulailler
-#           - select.mode_porte_poulailler
+#           - cover.porte_poulailler_porte
+#           - select.porte_poulailler_mode
 #           - sensor.mode_poulailler_lisible
-#           - sensor.luminosite_poulailler
-#           - sensor.courant_moteur_poulailler
+#           - sensor.porte_poulailler_luminosite
+#           - sensor.porte_poulailler_courant_moteur
 #           - sensor.heure_ouverture_poulailler
 #           - sensor.heure_fermeture_poulailler
 #       - type: entities
 #         title: Configuration
 #         entities:
-#           - input_number.poulailler_offset_ouv
-#           - input_number.poulailler_offset_fer
-#           - input_number.poulailler_lux_seuil_ouv
-#           - input_number.poulailler_lux_seuil_fer
-#           - input_number.poulailler_lux_confirmation
+#           - number.porte_poulailler_offset_ouverture
+#           - number.porte_poulailler_offset_fermeture
+#           - number.porte_poulailler_seuil_lux_ouverture
+#           - number.porte_poulailler_seuil_lux_fermeture
+#           - number.porte_poulailler_confirmation_luminosite

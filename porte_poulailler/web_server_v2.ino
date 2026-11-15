@@ -750,11 +750,12 @@ window.addEventListener('resize', dessinerGraphique);
 )rawhtml";
 
 // ── Envoi état complet JSON à tous les clients ───────────────
+// Appelé uniquement depuis loop() (lecture I2C et calculs hors tâche réseau)
 void wsBroadcastState() {
   if (ws.count() == 0) return;
 
   struct tm timeinfo;
-  bool heureOk = getLocalTime(&timeinfo);
+  bool heureOk = heureLocale(&timeinfo);
 
   HeureSoleil s = {0, 0, 0, 0};
   if (heureOk) {
@@ -767,17 +768,6 @@ void wsBroadcastState() {
   // Heures effectives selon mode soleil
   int ouvMin = heureEnMinutes(s.leverH,   s.leverM,   offsetOuv);
   int ferMin = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
-
-  const char* etatStr;
-  switch (etatPorte) {
-    case PORTE_OUVERTE:        etatStr = "open";    break;
-    case PORTE_FERMEE:         etatStr = "closed";  break;
-    case PORTE_EN_OUVERTURE:   etatStr = "opening"; break;
-    case PORTE_EN_FERMETURE:   etatStr = "closing"; break;
-    default:                   etatStr = "error";   break;
-  }
-
-  const char* modeStr[] = { "soleil", "luminosite", "heure_fixe", "manuel" };
 
   float lux = bh1750.readLightLevel();
   float amp = lireCourant();
@@ -811,8 +801,8 @@ void wsBroadcastState() {
     "\"fdc_fer\":%s"
     "}",
     heureStr,
-    etatStr,
-    modeStr[modeActuel],
+    etatVersStr(etatPorte),
+    MODES_STR[modeActuel],
     modePendingActif ? "true" : "false",
     s.leverH, s.leverM,
     s.coucherH, s.coucherM,
@@ -843,75 +833,69 @@ void wsLog(const char* msg, const char* type) {
   ws.textAll(buf);
 }
 
-// ── Traitement des messages WebSocket reçus ──────────────────
-void wsHandleMessage(void* arg, uint8_t* data, size_t len) {
+// ── File des messages reçus ─────────────────────────────────
+// Les callbacks WebSocket tournent dans la tâche réseau (AsyncTCP) : on n'y fait
+// que copier le message. Il est exécuté dans loop() (moteur, MQTT, I2C, NVS).
+#define WS_MSG_MAX   384
+#define WS_FILE_LEN  8
+struct MessageWeb { char json[WS_MSG_MAX]; };
+static QueueHandle_t fileWeb = nullptr;
+
+void wsRecevoirMessage(void* arg, uint8_t* data, size_t len) {
   AwsFrameInfo* info = (AwsFrameInfo*)arg;
   if (!info->final || info->index != 0 || info->len != len || info->opcode != WS_TEXT) return;
-  data[len] = 0;
+  if (len >= WS_MSG_MAX || fileWeb == nullptr) return;
+  MessageWeb m;
+  memcpy(m.json, data, len);   // copie bornée : pas d'écriture dans le tampon de la bibliothèque
+  m.json[len] = 0;
+  if (xQueueSend(fileWeb, &m, 0) != pdTRUE) Serial.println("[WS] File pleine — message ignoré");
+}
 
-  StaticJsonDocument<512> doc;
-  if (deserializeJson(doc, (char*)data) != DeserializationError::Ok) return;
+// Traite un message de la page web (appelé depuis loop())
+void traiterMessageWeb(const char* json) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json) != DeserializationError::Ok) return;
 
   // Commande porte
-  if (doc.containsKey("cmd")) {
-    String cmd = doc["cmd"].as<String>();
-    if      (cmd == "OPEN")      commandeOuvrir();
-    else if (cmd == "CLOSE")     commandeFermer();
-    else if (cmd == "STOP")      stopUrgence();
-    else if (cmd == "RESET")     resetErreur();
-    else if (cmd == "GET_STATE") wsBroadcastState();
+  const char* cmd = doc["cmd"];
+  if (cmd) {
+    if      (strcmp(cmd, "OPEN")      == 0) commandeOuvrir();
+    else if (strcmp(cmd, "CLOSE")     == 0) commandeFermer();
+    else if (strcmp(cmd, "STOP")      == 0) stopUrgence();
+    else if (strcmp(cmd, "RESET")     == 0) resetErreur();
+    else if (strcmp(cmd, "GET_STATE") == 0) wsBroadcastState();
   }
 
   // Changement de mode
-  if (doc.containsKey("mode")) {
+  const char* m = doc["mode"];
+  if (m) {
     ModeGestion nouveau;
-    String m = doc["mode"].as<String>();
-    if      (m == "soleil")     nouveau = MODE_SOLEIL;
-    else if (m == "luminosite") nouveau = MODE_LUMINOSITE;
-    else if (m == "heure_fixe") nouveau = MODE_HEURE_FIXE;
-    else                        nouveau = MODE_MANUEL;
-
-    if (etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE) {
-      modePending = nouveau;
-      modePendingActif = true;
-    } else {
-      if (nouveau != modeActuel) {  // ne publier que si le mode change réellement
-        modeActuel = nouveau;
-        publishMode();
-        sauvegarderConfig();
-      }
-    }
-    wsBroadcastState();
+    if (strVersMode(m, nouveau)) changerMode(nouveau);
   }
 
-  // Configuration — chaque clé est optionnelle
-  if (doc.containsKey("offset_ouv"))   offsetOuv           = doc["offset_ouv"].as<int>();
-  if (doc.containsKey("offset_fer"))   offsetFer           = doc["offset_fer"].as<int>();
-  if (doc.containsKey("lux_ouv"))      luxSeuilOuverture   = doc["lux_ouv"].as<float>();
-  if (doc.containsKey("lux_fer"))      luxSeuilFermeture   = doc["lux_fer"].as<float>();
-  if (doc.containsKey("lux_conf"))     luxConfirmationSec  = doc["lux_conf"].as<int>();
-  if (doc.containsKey("hfx_ouv_h"))   heureFixeOuvH       = doc["hfx_ouv_h"].as<int>();
-  if (doc.containsKey("hfx_ouv_m"))   heureFixeOuvM       = doc["hfx_ouv_m"].as<int>();
-  if (doc.containsKey("hfx_ouv_off")) offsetFixeOuv       = doc["hfx_ouv_off"].as<int>();
-  if (doc.containsKey("hfx_fer_h"))   heureFixeFerH       = doc["hfx_fer_h"].as<int>();
-  if (doc.containsKey("hfx_fer_m"))   heureFixeFerM       = doc["hfx_fer_m"].as<int>();
-  if (doc.containsKey("hfx_fer_off")) offsetFixeFer       = doc["hfx_fer_off"].as<int>();
-  sauvegarderConfig();
+  // Configuration — sauvegarde et republication MQTT seulement si une valeur change
+  if (appliquerConfigJson(doc)) paramModifie();
 }
 
-// ── Callback événements WebSocket ────────────────────────────
+void traiterFileWeb() {
+  if (fileWeb == nullptr) return;
+  MessageWeb m;
+  while (xQueueReceive(fileWeb, &m, 0) == pdTRUE) traiterMessageWeb(m.json);
+}
+
+// ── Callback événements WebSocket (tâche réseau) ─────────────
 void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                AwsEventType type, void* arg, uint8_t* data, size_t len) {
   switch (type) {
     case WS_EVT_CONNECT:
       Serial.printf("[WS] Client #%u connecté\n", client->id());
-      wsBroadcastState();
+      wsBroadcastDemande = true;   // diffusé par loop()
       break;
     case WS_EVT_DISCONNECT:
       Serial.printf("[WS] Client #%u déconnecté\n", client->id());
       break;
     case WS_EVT_DATA:
-      wsHandleMessage(arg, data, len);
+      wsRecevoirMessage(arg, data, len);
       break;
     default: break;
   }
@@ -919,6 +903,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 
 // ── Initialisation — à appeler dans setup() après WiFi ───────
 void setupWebServer() {
+  fileWeb = xQueueCreate(WS_FILE_LEN, sizeof(MessageWeb));
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
 

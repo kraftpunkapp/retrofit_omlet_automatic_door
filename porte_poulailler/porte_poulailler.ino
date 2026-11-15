@@ -51,6 +51,7 @@ void publishMode();
 void publishParams();
 void paramModifie();
 void publishHeuresSoleil();
+void traiterFileWeb();
 
 // ============================================================
 //  CONFIGURATION — À MODIFIER
@@ -102,6 +103,8 @@ const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";  // France — heure été/h
 
 #define ACS712_ZERO_ADC     3050  // Calibré sur le module réel
 #define ACS712_SEUIL_ADC    310   // ~2.7A → entre nominal (~2A/delta 246) et blocage (~3.3A/delta 375)
+#define SURCOURANT_MASQUAGE_MS    500  // ignore le pic de démarrage après la rampe
+#define SURCOURANT_CONFIRMATIONS  3    // mesures consécutives au-dessus du seuil avant arrêt
 
 // ============================================================
 //  TOPICS MQTT
@@ -131,7 +134,19 @@ const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";  // France — heure été/h
 #define TOPIC_HFX_OUV_M         MQTT_PREFIX "/param/hfx_ouv_m"
 #define TOPIC_HFX_FER_H         MQTT_PREFIX "/param/hfx_fer_h"
 #define TOPIC_HFX_FER_M         MQTT_PREFIX "/param/hfx_fer_m"
+#define TOPIC_LUX_CONF          MQTT_PREFIX "/param/lux_conf"
+#define TOPIC_DISPO             MQTT_PREFIX "/status"       // online / offline (LWT)
 #define MQTT_CLIENT_ID          "esp32_poulailler"
+
+// Bornes des paramètres réglables (MQTT, page web, NVS)
+#define OFFSET_SOLEIL_MIN   -60
+#define OFFSET_SOLEIL_MAX   120
+#define OFFSET_FIXE_MIN    -120
+#define OFFSET_FIXE_MAX     120
+#define LUX_MIN               0
+#define LUX_MAX           65535
+#define LUX_CONF_MIN         10
+#define LUX_CONF_MAX        300
 
 // ============================================================
 //  TYPES
@@ -198,12 +213,77 @@ unsigned long debutConditionLux     = 0;
 bool          conditionLuxActive    = false;
 bool          conditionLuxCible     = false;  // true=ouverture, false=fermeture
 
-// Override manuel temporaire
+// Override manuel temporaire (durée relative : insensible au débordement de millis())
 bool          forceManuel          = false;
-unsigned long forceManuelExpire     = 0;   // millis() à partir duquel l'auto reprend
+unsigned long forceManuelDebut     = 0;
+unsigned long forceManuelDuree     = 0;
 
 // Ignore les messages MQTT retain au démarrage
 unsigned long ignoreRetainUntil     = 0;
+
+// Surintensité : nombre de mesures consécutives au-dessus du seuil
+int           compteurSurcourant   = 0;
+
+// Demande de diffusion d'état (posée par la tâche réseau, traitée dans loop())
+volatile bool wsBroadcastDemande   = false;
+
+// ============================================================
+//  UTILITAIRES
+// ============================================================
+const char* MODES_STR[] = { "soleil", "luminosite", "heure_fixe", "manuel" };
+
+bool enMouvement() {
+  return etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE;
+}
+
+const char* etatVersStr(EtatPorte e) {
+  switch (e) {
+    case PORTE_OUVERTE:      return "open";
+    case PORTE_FERMEE:       return "closed";
+    case PORTE_EN_OUVERTURE: return "opening";
+    case PORTE_EN_FERMETURE: return "closing";
+    default:                 return "error";
+  }
+}
+
+// Convertit un nom de mode ; false si inconnu (le mode courant est alors conservé)
+bool strVersMode(const char* s, ModeGestion& out) {
+  for (int i = 0; i <= MODE_MANUEL; i++) {
+    if (strcmp(s, MODES_STR[i]) == 0) { out = (ModeGestion)i; return true; }
+  }
+  return false;
+}
+
+long borner(long v, long mn, long mx) { return v < mn ? mn : (v > mx ? mx : v); }
+
+// Met à jour un paramètre borné ; retourne true seulement s'il a changé
+bool majInt(int& var, long val, long mn, long mx) {
+  int v = (int)borner(val, mn, mx);
+  if (v == var) return false;
+  var = v;
+  return true;
+}
+bool majFloat(float& var, float val, float mn, float mx) {
+  float v = val < mn ? mn : (val > mx ? mx : val);
+  if (fabsf(v - var) < 0.5f) return false;
+  var = v;
+  return true;
+}
+
+// Vrai si "maintenant" est dans la plage [ouv, fer[ — gère une plage qui passe minuit
+bool dansFenetre(int maintenant, int ouv, int fer) {
+  if (ouv <= fer) return maintenant >= ouv && maintenant < fer;
+  return maintenant >= ouv || maintenant < fer;
+}
+
+// Minutes jusqu'à la prochaine occurrence de "cible" (1..1440)
+int minutesAvant(int maintenant, int cible) {
+  int d = ((cible - maintenant) % 1440 + 1440) % 1440;
+  return d == 0 ? 1440 : d;
+}
+
+// Heure locale sans attente (getLocalTime() bloque jusqu'à 5 s si l'heure n'est pas synchronisée)
+bool heureLocale(struct tm* t) { return getLocalTime(t, 0); }
 
 // ============================================================
 //  CALCUL LEVER / COUCHER DU SOLEIL (NOAA simplifié)
@@ -235,14 +315,15 @@ HeureSoleil calculSoleil(int annee, int mois, int jour, float lat, float lon) {
   float tLever   = tNoon - H / 15.0;
   float tCoucher = tNoon + H / 15.0;
   // Décalage UTC dynamique (gère heure été/hiver automatiquement)
-  struct tm tNow; getLocalTime(&tNow);
-  time_t t1 = mktime(&tNow);
-  struct tm* utc = gmtime(&t1);
-  float offsetH = (float)(tNow.tm_hour - utc->tm_hour);
-  if (offsetH < -12) offsetH += 24;
-  if (offsetH >  12) offsetH -= 24;
-  tLever   += offsetH;
-  tCoucher += offsetH;
+  time_t maintenant = time(nullptr);
+  struct tm loc, utc;
+  localtime_r(&maintenant, &loc);
+  gmtime_r(&maintenant, &utc);
+  int offsetMin = (loc.tm_hour * 60 + loc.tm_min) - (utc.tm_hour * 60 + utc.tm_min);
+  if (offsetMin < -720) offsetMin += 1440;
+  if (offsetMin >  720) offsetMin -= 1440;
+  tLever   += offsetMin / 60.0;
+  tCoucher += offsetMin / 60.0;
 
   // Normaliser dans la plage 0-24h (longitude négative peut donner des valeurs < 0)
   while (tLever   < 0)    tLever   += 24.0;
@@ -303,6 +384,17 @@ void resetErreur() {
   wsLog("Reset erreur — état relu depuis les fins de course", "info");
 }
 
+// Arrêt sur défaut (timeout, surintensité) — publie l'état complet
+void passerEnErreur(const char* raison) {
+  stopMoteur();
+  etatPorte = PORTE_ERREUR;
+  compteurSurcourant = 0;
+  Serial.printf("[ERREUR] %s\n", raison);
+  publishEtat();
+  wsLog(raison, "error");
+  wsBroadcastState();
+}
+
 // Démarrage progressif — rampe PWM de 0 à PWM_DUTY_9V en RAMPE_MS ms
 #define RAMPE_MS  300   // durée de la rampe en millisecondes
 
@@ -322,13 +414,14 @@ void ouvrirPorte() {
     Serial.println("[MOTEUR] Déjà ouverte (gauche).");
     return;
   }
-  if (etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE) {
+  if (enMouvement()) {
     Serial.println("[MOTEUR] Mouvement déjà en cours.");
     return;
   }
   Serial.println("[MOTEUR] Ouverture (droite → gauche)...");
   etatPorte = PORTE_EN_OUVERTURE;
   tempsDebutMouvement = millis();
+  compteurSurcourant = 0;
   publishEtat();
   demarrerMoteur(PIN_RPWM, PIN_LPWM, PWM_DUTY_9V);
   wsLog("Ouverture déclenchée", "info");
@@ -340,13 +433,14 @@ void fermerPorte() {
     Serial.println("[MOTEUR] Déjà fermée (droite).");
     return;
   }
-  if (etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE) {
+  if (enMouvement()) {
     Serial.println("[MOTEUR] Mouvement déjà en cours.");
     return;
   }
   Serial.println("[MOTEUR] Fermeture (gauche → droite)...");
   etatPorte = PORTE_EN_FERMETURE;
   tempsDebutMouvement = millis();
+  compteurSurcourant = 0;
   publishEtat();
   demarrerMoteur(PIN_LPWM, PIN_RPWM, PWM_DUTY_FER);
   wsLog("Fermeture déclenchée", "info");
@@ -376,14 +470,34 @@ bool surcourant() {
 // ============================================================
 void appliquerModePending() {
   if (!modePendingActif) return;
-  if (etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE) return;
+  if (enMouvement()) return;
+  modePendingActif = false;
   if (modePending != modeActuel) {
     modeActuel = modePending;
     publishMode();
+    sauvegarderConfig();
   }
-  modePendingActif = false;
   conditionLuxActive = false;  // reset confirmation lux
-  Serial.printf("[MODE] Appliqué : %d\n", modeActuel);
+  Serial.printf("[MODE] Appliqué : %s\n", MODES_STR[modeActuel]);
+  wsBroadcastState();
+}
+
+// Changement de mode (MQTT ou page web) — mis en attente si la porte bouge
+void changerMode(ModeGestion nouveau) {
+  if (enMouvement()) {
+    modePending = nouveau;
+    modePendingActif = true;
+    Serial.println("[MODE] En mouvement — mode mis en attente");
+  } else {
+    modePendingActif = false;
+    if (nouveau != modeActuel) {   // ne publier/sauver que si le mode change réellement
+      modeActuel = nouveau;
+      conditionLuxActive = false;
+      publishMode();
+      sauvegarderConfig();
+      Serial.printf("[MODE] Nouveau mode : %s\n", MODES_STR[modeActuel]);
+    }
+  }
   wsBroadcastState();
 }
 
@@ -423,9 +537,43 @@ void chargerConfig() {
   heureFixeFerH      = prefs.getInt("hfxFerH",    heureFixeFerH);
   heureFixeFerM      = prefs.getInt("hfxFerM",    heureFixeFerM);
   offsetFixeFer      = prefs.getInt("hfxFerOff",  offsetFixeFer);
-  modeActuel         = (ModeGestion)prefs.getInt("mode", (int)modeActuel);
+  int mode           = prefs.getInt("mode", (int)modeActuel);
   prefs.end();
+
+  // Valeurs NVS corrompues ou hors bornes → ramenées dans les limites
+  if (mode < MODE_SOLEIL || mode > MODE_MANUEL) mode = MODE_SOLEIL;
+  modeActuel = (ModeGestion)mode;
+  offsetOuv          = borner(offsetOuv,          OFFSET_SOLEIL_MIN, OFFSET_SOLEIL_MAX);
+  offsetFer          = borner(offsetFer,          OFFSET_SOLEIL_MIN, OFFSET_SOLEIL_MAX);
+  luxSeuilOuverture  = borner(luxSeuilOuverture,  LUX_MIN, LUX_MAX);
+  luxSeuilFermeture  = borner(luxSeuilFermeture,  LUX_MIN, LUX_MAX);
+  luxConfirmationSec = borner(luxConfirmationSec, LUX_CONF_MIN, LUX_CONF_MAX);
+  heureFixeOuvH      = borner(heureFixeOuvH, 0, 23);
+  heureFixeOuvM      = borner(heureFixeOuvM, 0, 59);
+  heureFixeFerH      = borner(heureFixeFerH, 0, 23);
+  heureFixeFerM      = borner(heureFixeFerM, 0, 59);
+  offsetFixeOuv      = borner(offsetFixeOuv, OFFSET_FIXE_MIN, OFFSET_FIXE_MAX);
+  offsetFixeFer      = borner(offsetFixeFer, OFFSET_FIXE_MIN, OFFSET_FIXE_MAX);
   Serial.println("[NVS] Config chargée");
+}
+
+// Applique les clés présentes d'un JSON de configuration (bornées).
+// Retourne true si au moins un paramètre a réellement changé.
+bool appliquerConfigJson(JsonDocument& doc) {
+  bool modifie = false;
+  JsonVariantConst v;
+  if (!(v = doc["offset_ouv"]).isNull())  modifie |= majInt(offsetOuv,          v.as<long>(),  OFFSET_SOLEIL_MIN, OFFSET_SOLEIL_MAX);
+  if (!(v = doc["offset_fer"]).isNull())  modifie |= majInt(offsetFer,          v.as<long>(),  OFFSET_SOLEIL_MIN, OFFSET_SOLEIL_MAX);
+  if (!(v = doc["lux_ouv"]).isNull())     modifie |= majFloat(luxSeuilOuverture, v.as<float>(), LUX_MIN, LUX_MAX);
+  if (!(v = doc["lux_fer"]).isNull())     modifie |= majFloat(luxSeuilFermeture, v.as<float>(), LUX_MIN, LUX_MAX);
+  if (!(v = doc["lux_conf"]).isNull())    modifie |= majInt(luxConfirmationSec, v.as<long>(),  LUX_CONF_MIN, LUX_CONF_MAX);
+  if (!(v = doc["hfx_ouv_h"]).isNull())   modifie |= majInt(heureFixeOuvH,      v.as<long>(),  0, 23);
+  if (!(v = doc["hfx_ouv_m"]).isNull())   modifie |= majInt(heureFixeOuvM,      v.as<long>(),  0, 59);
+  if (!(v = doc["hfx_ouv_off"]).isNull()) modifie |= majInt(offsetFixeOuv,      v.as<long>(),  OFFSET_FIXE_MIN, OFFSET_FIXE_MAX);
+  if (!(v = doc["hfx_fer_h"]).isNull())   modifie |= majInt(heureFixeFerH,      v.as<long>(),  0, 23);
+  if (!(v = doc["hfx_fer_m"]).isNull())   modifie |= majInt(heureFixeFerM,      v.as<long>(),  0, 59);
+  if (!(v = doc["hfx_fer_off"]).isNull()) modifie |= majInt(offsetFixeFer,      v.as<long>(),  OFFSET_FIXE_MIN, OFFSET_FIXE_MAX);
+  return modifie;
 }
 
 // ============================================================
@@ -437,40 +585,30 @@ void activerForceManuel() {
   // Calculer la durée jusqu'à la prochaine échéance (max 12h)
   unsigned long dureeMs = 12UL * 3600UL * 1000UL;  // fallback 12h
 
-  struct tm t;
-  if (getLocalTime(&t)) {
-    int maintenant = t.tm_hour * 60 + t.tm_min;
-    int cible = -1;
-
-    if (modeActuel == MODE_SOLEIL) {
-      HeureSoleil s = calculSoleil(t.tm_year+1900, t.tm_mon+1, t.tm_mday, LATITUDE, LONGITUDE);
-      int heureOuv = heureEnMinutes(s.leverH, s.leverM, offsetOuv);
-      int heureFer = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
-      // Prochaine échéance = prochain lever ou coucher
-      if (maintenant < heureOuv)      cible = heureOuv;
-      else if (maintenant < heureFer) cible = heureFer;
-      else                            cible = heureOuv + 1440;  // lever demain
-    } else if (modeActuel == MODE_HEURE_FIXE) {
-      int heureOuv = heureEnMinutes(heureFixeOuvH, heureFixeOuvM, offsetFixeOuv);
-      int heureFer = heureEnMinutes(heureFixeFerH, heureFixeFerM, offsetFixeFer);
-      if (maintenant < heureOuv)      cible = heureOuv;
-      else if (maintenant < heureFer) cible = heureFer;
-      else                            cible = heureOuv + 1440;
-    } else if (modeActuel == MODE_LUMINOSITE) {
-      // Pour luminosité : suspension de 30 minutes
-      dureeMs = 30UL * 60UL * 1000UL;
-      cible = -1;
-    }
-
-    if (cible >= 0) {
-      int delta = cible - maintenant;
-      if (delta < 0) delta += 1440;
+  if (modeActuel == MODE_LUMINOSITE) {
+    dureeMs = 30UL * 60UL * 1000UL;  // luminosité : suspension de 30 minutes
+  } else {
+    struct tm t;
+    if (heureLocale(&t)) {
+      int maintenant = t.tm_hour * 60 + t.tm_min;
+      int heureOuv, heureFer;
+      if (modeActuel == MODE_SOLEIL) {
+        HeureSoleil s = calculSoleil(t.tm_year+1900, t.tm_mon+1, t.tm_mday, LATITUDE, LONGITUDE);
+        heureOuv = heureEnMinutes(s.leverH,   s.leverM,   offsetOuv);
+        heureFer = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
+      } else {
+        heureOuv = heureEnMinutes(heureFixeOuvH, heureFixeOuvM, offsetFixeOuv);
+        heureFer = heureEnMinutes(heureFixeFerH, heureFixeFerM, offsetFixeFer);
+      }
+      // Prochaine échéance = la plus proche des deux (fonctionne même si la plage passe minuit)
+      int delta = min(minutesAvant(maintenant, heureOuv), minutesAvant(maintenant, heureFer));
       dureeMs = (unsigned long)delta * 60UL * 1000UL;
     }
   }
 
   forceManuel = true;
-  forceManuelExpire = millis() + dureeMs;
+  forceManuelDebut = millis();
+  forceManuelDuree = dureeMs;
 
   char msg[64];
   snprintf(msg, sizeof(msg), "Mode auto suspendu jusqu'à la prochaine échéance");
@@ -482,37 +620,37 @@ void activerForceManuel() {
 //  GESTION AUTOMATIQUE
 // ============================================================
 
-// ── Mode SOLEIL ──────────────────────────────────────────────
-void gestionSoleil() {
-  // Vérifier expiration override manuel
-  if (forceManuel && millis() >= forceManuelExpire) {
+// Retourne true si l'override manuel est toujours actif (et le lève s'il a expiré)
+bool overrideActif() {
+  if (forceManuel && millis() - forceManuelDebut >= forceManuelDuree) {
     forceManuel = false;
     Serial.println("[AUTO] Override manuel expiré — reprise automatique");
     wsLog("Reprise automatique", "info");
     wsBroadcastState();
   }
-  if (forceManuel) return;
+  return forceManuel;
+}
 
-  struct tm t; if (!getLocalTime(&t)) return;
-  HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, LATITUDE, LONGITUDE);
-  int maintenant = t.tm_hour * 60 + t.tm_min;
-  int heureOuv   = heureEnMinutes(s.leverH,   s.leverM,   offsetOuv);
-  int heureFer   = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
-  bool doitEtreOuverte = (maintenant >= heureOuv && maintenant < heureFer);
+// Ouvre ou ferme selon la plage horaire [heureOuv, heureFer[
+void appliquerPlage(int maintenant, int heureOuv, int heureFer) {
+  bool doitEtreOuverte = dansFenetre(maintenant, heureOuv, heureFer);
   if (doitEtreOuverte  && etatPorte == PORTE_FERMEE) ouvrirPorte();
   if (!doitEtreOuverte && etatPorte == PORTE_OUVERTE) fermerPorte();
 }
 
+// ── Mode SOLEIL ──────────────────────────────────────────────
+void gestionSoleil() {
+  if (overrideActif()) return;
+  struct tm t; if (!heureLocale(&t)) return;
+  HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, LATITUDE, LONGITUDE);
+  appliquerPlage(t.tm_hour * 60 + t.tm_min,
+                 heureEnMinutes(s.leverH,   s.leverM,   offsetOuv),
+                 heureEnMinutes(s.coucherH, s.coucherM, offsetFer));
+}
+
 // ── Mode LUMINOSITE ──────────────────────────────────────────
 void gestionLuminosite() {
-  // Vérifier expiration override manuel
-  if (forceManuel && millis() >= forceManuelExpire) {
-    forceManuel = false;
-    Serial.println("[AUTO] Override manuel expiré — reprise automatique");
-    wsLog("Reprise automatique", "info");
-    wsBroadcastState();
-  }
-  if (forceManuel) return;
+  if (overrideActif()) return;
 
   float lux = bh1750.readLightLevel();
 
@@ -556,22 +694,11 @@ void gestionLuminosite() {
 
 // ── Mode HEURE FIXE ──────────────────────────────────────────
 void gestionHeureFixe() {
-  // Vérifier expiration override manuel
-  if (forceManuel && millis() >= forceManuelExpire) {
-    forceManuel = false;
-    Serial.println("[AUTO] Override manuel expiré — reprise automatique");
-    wsLog("Reprise automatique", "info");
-    wsBroadcastState();
-  }
-  if (forceManuel) return;
-
-  struct tm t; if (!getLocalTime(&t)) return;
-  int maintenant = t.tm_hour * 60 + t.tm_min;
-  int heureOuv   = heureEnMinutes(heureFixeOuvH, heureFixeOuvM, offsetFixeOuv);
-  int heureFer   = heureEnMinutes(heureFixeFerH, heureFixeFerM, offsetFixeFer);
-  bool doitEtreOuverte = (maintenant >= heureOuv && maintenant < heureFer);
-  if (doitEtreOuverte  && etatPorte == PORTE_FERMEE) ouvrirPorte();
-  if (!doitEtreOuverte && etatPorte == PORTE_OUVERTE) fermerPorte();
+  if (overrideActif()) return;
+  struct tm t; if (!heureLocale(&t)) return;
+  appliquerPlage(t.tm_hour * 60 + t.tm_min,
+                 heureEnMinutes(heureFixeOuvH, heureFixeOuvM, offsetFixeOuv),
+                 heureEnMinutes(heureFixeFerH, heureFixeFerM, offsetFixeFer));
 }
 
 
@@ -609,16 +736,8 @@ void publishWifi() {
 //  MQTT
 // ============================================================
 void publishEtat() {
-  if (!MQTT_ENABLED) return;
-  const char* s;
-  switch (etatPorte) {
-    case PORTE_OUVERTE:        s = "open";    break;
-    case PORTE_FERMEE:         s = "closed";  break;
-    case PORTE_EN_OUVERTURE:   s = "opening"; break;
-    case PORTE_EN_FERMETURE:   s = "closing"; break;
-    default:                   s = "error";   break;
-  }
-  mqtt.publish(TOPIC_ETAT_PORTE, s, true);
+  if (!MQTT_ENABLED || !mqtt.connected()) return;
+  mqtt.publish(TOPIC_ETAT_PORTE, etatVersStr(etatPorte), true);
 
   // État en texte lisible (pour capteur HA)
   const char* txt;
@@ -648,12 +767,12 @@ void publishParams() {
   snprintf(b, sizeof(b), "%d", heureFixeOuvM);       mqtt.publish(TOPIC_HFX_OUV_M, b, true);
   snprintf(b, sizeof(b), "%d", heureFixeFerH);       mqtt.publish(TOPIC_HFX_FER_H, b, true);
   snprintf(b, sizeof(b), "%d", heureFixeFerM);       mqtt.publish(TOPIC_HFX_FER_M, b, true);
+  snprintf(b, sizeof(b), "%d", luxConfirmationSec);  mqtt.publish(TOPIC_LUX_CONF,  b, true);
 }
 
 void publishMode() {
   if (!MQTT_ENABLED) return;
-  const char* modes[] = { "soleil", "luminosite", "heure_fixe", "manuel" };
-  mqtt.publish(TOPIC_MODE, modes[modeActuel], false);  // pas de retain — évite les boucles
+  mqtt.publish(TOPIC_MODE, MODES_STR[modeActuel], false);  // pas de retain — évite les boucles
 }
 
 void publishCapteurs() {
@@ -669,7 +788,7 @@ void publishCapteurs() {
 
 void publishHeuresSoleil() {
   if (!MQTT_ENABLED) return;
-  struct tm t; if (!getLocalTime(&t)) return;
+  struct tm t; if (!heureLocale(&t)) return;
   HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, LATITUDE, LONGITUDE);
   int ouvMin = heureEnMinutes(s.leverH,   s.leverM,   offsetOuv);
   int ferMin = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
@@ -697,75 +816,64 @@ void commandeFermer() {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  String msg;
-  for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
-  msg.trim();
-  Serial.printf("[MQTT] %s → %s\n", topic, msg.c_str());
+  char msg[256];
+  unsigned int n = length < sizeof(msg) - 1 ? length : sizeof(msg) - 1;
+  memcpy(msg, payload, n);
+  msg[n] = 0;
+  String s(msg);
+  s.trim();
+  Serial.printf("[MQTT] %s → %s\n", topic, s.c_str());
 
   // Ignorer les retain au démarrage (mode + paramètres) pour éviter
   // que les valeurs retain HA n'écrasent celles chargées depuis la NVS.
   // Les commandes porte (OPEN/CLOSE/STOP/RESET) ne sont jamais ignorées.
-  if (millis() < ignoreRetainUntil && String(topic) != TOPIC_COMMANDE_PORTE) {
+  bool estCommande = strcmp(topic, TOPIC_COMMANDE_PORTE) == 0;
+  if (millis() < ignoreRetainUntil && !estCommande) {
     Serial.println("[MQTT] Retain ignoré (démarrage)");
     return;
   }
 
-  if (String(topic) == TOPIC_COMMANDE_PORTE) {
-    if (msg == "OPEN")  commandeOuvrir();
-    if (msg == "CLOSE") commandeFermer();
-    if (msg == "STOP")  stopUrgence();
-    if (msg == "RESET") resetErreur();
+  if (estCommande) {
+    if      (s == "OPEN")  commandeOuvrir();
+    else if (s == "CLOSE") commandeFermer();
+    else if (s == "STOP")  stopUrgence();
+    else if (s == "RESET") resetErreur();
+    return;
   }
-  else if (String(topic) == TOPIC_MODE) {
+
+  if (strcmp(topic, TOPIC_MODE) == 0) {
+    // Notre propre publication revient aussi ici : changerMode() ignore un mode inchangé
     ModeGestion nouveau;
-    if      (msg == "soleil")     nouveau = MODE_SOLEIL;
-    else if (msg == "luminosite") nouveau = MODE_LUMINOSITE;
-    else if (msg == "heure_fixe") nouveau = MODE_HEURE_FIXE;
-    else                          nouveau = MODE_MANUEL;
-    // Appliquer immédiatement si porte stable, sinon mettre en attente
-    if (etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE) {
-      modePending = nouveau;
-      modePendingActif = true;
-      Serial.println("[MODE] En mouvement — mode mis en attente");
-    } else {
-      if (nouveau != modeActuel) {   // ne publier que si le mode change réellement
-        modeActuel = nouveau;
-        publishMode();
-      }
-      wsBroadcastState();
-    }
+    if (strVersMode(s.c_str(), nouveau)) changerMode(nouveau);
+    else Serial.println("[MODE] Mode inconnu ignoré");
+    return;
   }
-  else if (String(topic) == TOPIC_CONFIG) {
+
+  if (strcmp(topic, TOPIC_CONFIG) == 0) {
     // JSON de configuration complet
     // ex: {"offset_ouv":15,"offset_fer":-10,"lux_ouv":800,"lux_fer":100,"lux_conf":60,
     //       "hfx_ouv_h":7,"hfx_ouv_m":30,"hfx_ouv_off":0,
     //       "hfx_fer_h":20,"hfx_fer_m":0,"hfx_fer_off":0}
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, msg) == DeserializationError::Ok) {
-      if (doc.containsKey("offset_ouv"))   offsetOuv           = doc["offset_ouv"];
-      if (doc.containsKey("offset_fer"))   offsetFer           = doc["offset_fer"];
-      if (doc.containsKey("lux_ouv"))      luxSeuilOuverture   = doc["lux_ouv"];
-      if (doc.containsKey("lux_fer"))      luxSeuilFermeture   = doc["lux_fer"];
-      if (doc.containsKey("lux_conf"))     luxConfirmationSec  = doc["lux_conf"];
-      if (doc.containsKey("hfx_ouv_h"))   heureFixeOuvH       = doc["hfx_ouv_h"];
-      if (doc.containsKey("hfx_ouv_m"))   heureFixeOuvM       = doc["hfx_ouv_m"];
-      if (doc.containsKey("hfx_ouv_off")) offsetFixeOuv       = doc["hfx_ouv_off"];
-      if (doc.containsKey("hfx_fer_h"))   heureFixeFerH       = doc["hfx_fer_h"];
-      if (doc.containsKey("hfx_fer_m"))   heureFixeFerM       = doc["hfx_fer_m"];
-      if (doc.containsKey("hfx_fer_off")) offsetFixeFer       = doc["hfx_fer_off"];
-      sauvegarderConfig();
-      wsBroadcastState();
-    }
+    JsonDocument doc;
+    if (deserializeJson(doc, msg) == DeserializationError::Ok && appliquerConfigJson(doc))
+      paramModifie();
+    return;
   }
+
   // ── Paramètres individuels (entités number HA) ──────────────
-  else if (String(topic) == TOPIC_OFFSET_OUV) { offsetOuv = msg.toInt();          paramModifie(); }
-  else if (String(topic) == TOPIC_OFFSET_FER) { offsetFer = msg.toInt();          paramModifie(); }
-  else if (String(topic) == TOPIC_LUX_OUV)    { luxSeuilOuverture = msg.toFloat(); paramModifie(); }
-  else if (String(topic) == TOPIC_LUX_FER)    { luxSeuilFermeture = msg.toFloat(); paramModifie(); }
-  else if (String(topic) == TOPIC_HFX_OUV_H)  { heureFixeOuvH = msg.toInt();       paramModifie(); }
-  else if (String(topic) == TOPIC_HFX_OUV_M)  { heureFixeOuvM = msg.toInt();       paramModifie(); }
-  else if (String(topic) == TOPIC_HFX_FER_H)  { heureFixeFerH = msg.toInt();       paramModifie(); }
-  else if (String(topic) == TOPIC_HFX_FER_M)  { heureFixeFerM = msg.toInt();       paramModifie(); }
+  // L'ESP32 republie ces topics (retain) et les reçoit en retour : on ne
+  // réagit que si la valeur change, sinon boucle infinie publication/réception.
+  bool modifie = false;
+  if      (strcmp(topic, TOPIC_OFFSET_OUV) == 0) modifie = majInt(offsetOuv,          s.toInt(),   OFFSET_SOLEIL_MIN, OFFSET_SOLEIL_MAX);
+  else if (strcmp(topic, TOPIC_OFFSET_FER) == 0) modifie = majInt(offsetFer,          s.toInt(),   OFFSET_SOLEIL_MIN, OFFSET_SOLEIL_MAX);
+  else if (strcmp(topic, TOPIC_LUX_OUV)    == 0) modifie = majFloat(luxSeuilOuverture, s.toFloat(), LUX_MIN, LUX_MAX);
+  else if (strcmp(topic, TOPIC_LUX_FER)    == 0) modifie = majFloat(luxSeuilFermeture, s.toFloat(), LUX_MIN, LUX_MAX);
+  else if (strcmp(topic, TOPIC_LUX_CONF)   == 0) modifie = majInt(luxConfirmationSec, s.toInt(),   LUX_CONF_MIN, LUX_CONF_MAX);
+  else if (strcmp(topic, TOPIC_HFX_OUV_H)  == 0) modifie = majInt(heureFixeOuvH,      s.toInt(),   0, 23);
+  else if (strcmp(topic, TOPIC_HFX_OUV_M)  == 0) modifie = majInt(heureFixeOuvM,      s.toInt(),   0, 59);
+  else if (strcmp(topic, TOPIC_HFX_FER_H)  == 0) modifie = majInt(heureFixeFerH,      s.toInt(),   0, 23);
+  else if (strcmp(topic, TOPIC_HFX_FER_M)  == 0) modifie = majInt(heureFixeFerM,      s.toInt(),   0, 59);
+  if (modifie) paramModifie();
 }
 
 // Appelé après modification d'un paramètre : sauvegarde + republie état
@@ -780,8 +888,9 @@ bool connecterMQTT() {
   if (!MQTT_ENABLED) return true;
   if (mqtt.connected()) return true;
   Serial.print("[MQTT] Connexion...");
+  // LWT sur un topic de disponibilité dédié (et non sur l'état de la porte)
   if (mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS,
-                   TOPIC_ETAT_PORTE, 1, true, "offline")) {
+                   TOPIC_DISPO, 1, true, "offline")) {
     Serial.println(" OK");
     mqtt.subscribe(TOPIC_COMMANDE_PORTE);
     mqtt.subscribe(TOPIC_MODE);
@@ -790,15 +899,18 @@ bool connecterMQTT() {
     mqtt.subscribe(TOPIC_OFFSET_FER);
     mqtt.subscribe(TOPIC_LUX_OUV);
     mqtt.subscribe(TOPIC_LUX_FER);
+    mqtt.subscribe(TOPIC_LUX_CONF);
     mqtt.subscribe(TOPIC_HFX_OUV_H);
     mqtt.subscribe(TOPIC_HFX_OUV_M);
     mqtt.subscribe(TOPIC_HFX_FER_H);
     mqtt.subscribe(TOPIC_HFX_FER_M);
     publishDiscovery();      // auto-déclaration des entités HA
+    mqtt.publish(TOPIC_DISPO, "online", true);
     publishEtat();
     publishMode();
     publishParams();
     publishWifi();
+    publishHeuresSoleil();
     ignoreRetainUntil = millis() + 3000;  // ignorer les retain pendant 3s
     return true;
   }
@@ -810,186 +922,124 @@ bool connecterMQTT() {
 // ============================================================
 //  MQTT DISCOVERY — Auto-déclaration des entités Home Assistant
 // ============================================================
-// Publie la config sur homeassistant/<type>/<id>/config (retain)
+// Publie la config sur homeassistant/<type>/poulailler/<id>/config (retain)
 // HA crée automatiquement les entités. Voir docs MQTT Discovery.
 
 #define HA_PREFIX  "homeassistant"
-#define HA_DEVICE  "\"device\":{\"identifiers\":[\"esp32_poulailler\"],\"name\":\"Porte Poulailler\",\"model\":\"ESP32 Retrofit Omlet\",\"manufacturer\":\"DIY\"}"
+#define HA_COMMUN  "\"availability_topic\":\"" TOPIC_DISPO "\"," \
+                   "\"device\":{\"identifiers\":[\"esp32_poulailler\"],\"name\":\"Porte Poulailler\",\"model\":\"ESP32 Retrofit Omlet\",\"manufacturer\":\"DIY\"}"
+
+// Publie une entité : "corps" = champs JSON propres à l'entité (sans accolades)
+bool publierEntite(const char* type, const char* id, const char* corps) {
+  char topic[96];
+  char buf[768];
+  snprintf(topic, sizeof(topic), HA_PREFIX "/%s/poulailler/%s/config", type, id);
+  int n = snprintf(buf, sizeof(buf), "{%s," HA_COMMUN "}", corps);
+  if (n >= (int)sizeof(buf)) {
+    Serial.printf("[MQTT] Discovery %s trop long (%d)\n", id, n);
+    return false;
+  }
+  return mqtt.publish(topic, buf, true);
+}
+
+// Entité number réglable (command_topic == state_topic)
+#define NUMBER(nom, uid, topic, bornes) \
+  "\"name\":\"" nom "\",\"unique_id\":\"poulailler_" uid "\"," \
+  "\"command_topic\":\"" topic "\",\"state_topic\":\"" topic "\"," bornes
 
 void publishDiscovery() {
   if (!MQTT_ENABLED) return;
+  bool ok = true;
 
-  char topic[128];
-  char buf[768];
-
-  // ── Cover (la porte) ───────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/cover/poulailler/porte/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Porte\",\"unique_id\":\"poulailler_porte\","
-    "\"device_class\":\"door\","
-    "\"command_topic\":\"" TOPIC_COMMANDE_PORTE "\","
-    "\"state_topic\":\"" TOPIC_ETAT_PORTE "\","
+  ok &= publierEntite("cover", "porte",
+    "\"name\":\"Porte\",\"unique_id\":\"poulailler_porte\",\"device_class\":\"door\","
+    "\"command_topic\":\"" TOPIC_COMMANDE_PORTE "\",\"state_topic\":\"" TOPIC_ETAT_PORTE "\","
     "\"payload_open\":\"OPEN\",\"payload_close\":\"CLOSE\",\"payload_stop\":\"STOP\","
     "\"state_open\":\"open\",\"state_closed\":\"closed\","
-    "\"state_opening\":\"opening\",\"state_closing\":\"closing\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"state_opening\":\"opening\",\"state_closing\":\"closing\"");
 
-  // ── Select (mode) ──────────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/select/poulailler/mode/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Mode\",\"unique_id\":\"poulailler_mode\","
-    "\"command_topic\":\"" TOPIC_MODE "\","
-    "\"state_topic\":\"" TOPIC_MODE "\","
-    "\"options\":[\"soleil\",\"luminosite\",\"heure_fixe\",\"manuel\"],"
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+  ok &= publierEntite("select", "mode",
+    "\"name\":\"Mode\",\"unique_id\":\"poulailler_mode\","
+    "\"command_topic\":\"" TOPIC_MODE "\",\"state_topic\":\"" TOPIC_MODE "\","
+    "\"options\":[\"soleil\",\"luminosite\",\"heure_fixe\",\"manuel\"]");
 
-  // ── Sensor luminosité ──────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/sensor/poulailler/lux/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Luminosite\",\"unique_id\":\"poulailler_lux\","
+  ok &= publierEntite("sensor", "lux",
+    "\"name\":\"Luminosite\",\"unique_id\":\"poulailler_lux\","
     "\"state_topic\":\"" TOPIC_LUMINOSITE "\","
-    "\"unit_of_measurement\":\"lx\",\"device_class\":\"illuminance\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"unit_of_measurement\":\"lx\",\"device_class\":\"illuminance\"");
 
-  // ── Sensor courant ─────────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/sensor/poulailler/courant/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Courant moteur\",\"unique_id\":\"poulailler_courant\","
+  ok &= publierEntite("sensor", "courant",
+    "\"name\":\"Courant moteur\",\"unique_id\":\"poulailler_courant\","
     "\"state_topic\":\"" TOPIC_COURANT "\","
-    "\"unit_of_measurement\":\"A\",\"device_class\":\"current\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"unit_of_measurement\":\"A\",\"device_class\":\"current\"");
 
-  // ── Sensor RSSI WiFi ───────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/sensor/poulailler/rssi/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"WiFi RSSI\",\"unique_id\":\"poulailler_rssi\","
+  ok &= publierEntite("sensor", "soleil",
+    "\"name\":\"Heures soleil\",\"unique_id\":\"poulailler_soleil\","
+    "\"state_topic\":\"" TOPIC_HEURE_SOLEIL "\","
+    "\"value_template\":\"{{ value_json.ouverture }} / {{ value_json.fermeture }}\","
+    "\"json_attributes_topic\":\"" TOPIC_HEURE_SOLEIL "\",\"icon\":\"mdi:weather-sunset\"");
+
+  ok &= publierEntite("sensor", "rssi",
+    "\"name\":\"WiFi RSSI\",\"unique_id\":\"poulailler_rssi\","
     "\"state_topic\":\"" TOPIC_RSSI "\","
     "\"unit_of_measurement\":\"dBm\",\"device_class\":\"signal_strength\","
-    "\"entity_category\":\"diagnostic\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"entity_category\":\"diagnostic\"");
 
-  // ── Sensor qualité WiFi ────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/sensor/poulailler/wifi/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"WiFi qualite\",\"unique_id\":\"poulailler_wifi\","
+  ok &= publierEntite("sensor", "wifi",
+    "\"name\":\"WiFi qualite\",\"unique_id\":\"poulailler_wifi\","
     "\"state_topic\":\"" TOPIC_WIFI "\","
-    "\"unit_of_measurement\":\"%%\",\"icon\":\"mdi:wifi\","
-    "\"entity_category\":\"diagnostic\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"unit_of_measurement\":\"%\",\"icon\":\"mdi:wifi\","
+    "\"entity_category\":\"diagnostic\"");
 
-  // ── Sensor état texte ──────────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/sensor/poulailler/etat/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Etat porte\",\"unique_id\":\"poulailler_etat\","
-    "\"state_topic\":\"" TOPIC_ETAT_TEXTE "\","
-    "\"icon\":\"mdi:door\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+  ok &= publierEntite("sensor", "etat",
+    "\"name\":\"Etat porte\",\"unique_id\":\"poulailler_etat\","
+    "\"state_topic\":\"" TOPIC_ETAT_TEXTE "\",\"icon\":\"mdi:door\"");
 
-  // ── Binary sensor FDC ouvert ───────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/binary_sensor/poulailler/fdc_ouv/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Fin de course ouvert\",\"unique_id\":\"poulailler_fdc_ouv\","
+  ok &= publierEntite("binary_sensor", "fdc_ouv",
+    "\"name\":\"Fin de course ouvert\",\"unique_id\":\"poulailler_fdc_ouv\","
     "\"state_topic\":\"" TOPIC_FDC_OUV "\","
     "\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"icon\":\"mdi:arrow-left-bold\","
-    "\"entity_category\":\"diagnostic\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"entity_category\":\"diagnostic\"");
 
-  // ── Binary sensor FDC fermé ────────────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/binary_sensor/poulailler/fdc_fer/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Fin de course ferme\",\"unique_id\":\"poulailler_fdc_fer\","
+  ok &= publierEntite("binary_sensor", "fdc_fer",
+    "\"name\":\"Fin de course ferme\",\"unique_id\":\"poulailler_fdc_fer\","
     "\"state_topic\":\"" TOPIC_FDC_FER "\","
     "\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"icon\":\"mdi:arrow-right-bold\","
-    "\"entity_category\":\"diagnostic\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"entity_category\":\"diagnostic\"");
 
-  // ── Number : offset ouverture soleil ───────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/offset_ouv/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Offset ouverture\",\"unique_id\":\"poulailler_offset_ouv\","
-    "\"command_topic\":\"" TOPIC_OFFSET_OUV "\",\"state_topic\":\"" TOPIC_OFFSET_OUV "\","
+  ok &= publierEntite("number", "offset_ouv", NUMBER("Offset ouverture", "offset_ouv", TOPIC_OFFSET_OUV,
     "\"min\":-60,\"max\":120,\"step\":1,\"unit_of_measurement\":\"min\","
-    "\"mode\":\"slider\",\"icon\":\"mdi:weather-sunset-up\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"mode\":\"slider\",\"icon\":\"mdi:weather-sunset-up\""));
 
-  // ── Number : offset fermeture soleil ───────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/offset_fer/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Offset fermeture\",\"unique_id\":\"poulailler_offset_fer\","
-    "\"command_topic\":\"" TOPIC_OFFSET_FER "\",\"state_topic\":\"" TOPIC_OFFSET_FER "\","
+  ok &= publierEntite("number", "offset_fer", NUMBER("Offset fermeture", "offset_fer", TOPIC_OFFSET_FER,
     "\"min\":-60,\"max\":120,\"step\":1,\"unit_of_measurement\":\"min\","
-    "\"mode\":\"slider\",\"icon\":\"mdi:weather-sunset-down\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"mode\":\"slider\",\"icon\":\"mdi:weather-sunset-down\""));
 
-  // ── Number : seuil lux ouverture ───────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/lux_ouv/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Seuil lux ouverture\",\"unique_id\":\"poulailler_lux_ouv\","
-    "\"command_topic\":\"" TOPIC_LUX_OUV "\",\"state_topic\":\"" TOPIC_LUX_OUV "\","
+  ok &= publierEntite("number", "lux_ouv", NUMBER("Seuil lux ouverture", "lux_ouv", TOPIC_LUX_OUV,
     "\"min\":0,\"max\":2000,\"step\":10,\"unit_of_measurement\":\"lx\","
-    "\"mode\":\"box\",\"icon\":\"mdi:brightness-6\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"mode\":\"box\",\"icon\":\"mdi:brightness-6\""));
 
-  // ── Number : seuil lux fermeture ───────────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/lux_fer/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Seuil lux fermeture\",\"unique_id\":\"poulailler_lux_fer\","
-    "\"command_topic\":\"" TOPIC_LUX_FER "\",\"state_topic\":\"" TOPIC_LUX_FER "\","
+  ok &= publierEntite("number", "lux_fer", NUMBER("Seuil lux fermeture", "lux_fer", TOPIC_LUX_FER,
     "\"min\":0,\"max\":2000,\"step\":10,\"unit_of_measurement\":\"lx\","
-    "\"mode\":\"box\",\"icon\":\"mdi:brightness-4\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+    "\"mode\":\"box\",\"icon\":\"mdi:brightness-4\""));
 
-  // ── Number : heure fixe ouverture (H) ──────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/hfx_ouv_h/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Heure fixe ouverture (h)\",\"unique_id\":\"poulailler_hfx_ouv_h\","
-    "\"command_topic\":\"" TOPIC_HFX_OUV_H "\",\"state_topic\":\"" TOPIC_HFX_OUV_H "\","
-    "\"min\":0,\"max\":23,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+  ok &= publierEntite("number", "lux_conf", NUMBER("Confirmation luminosite", "lux_conf", TOPIC_LUX_CONF,
+    "\"min\":10,\"max\":300,\"step\":10,\"unit_of_measurement\":\"s\","
+    "\"mode\":\"box\",\"icon\":\"mdi:timer-outline\""));
 
-  // ── Number : heure fixe ouverture (M) ──────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/hfx_ouv_m/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Minute fixe ouverture\",\"unique_id\":\"poulailler_hfx_ouv_m\","
-    "\"command_topic\":\"" TOPIC_HFX_OUV_M "\",\"state_topic\":\"" TOPIC_HFX_OUV_M "\","
-    "\"min\":0,\"max\":59,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+  ok &= publierEntite("number", "hfx_ouv_h", NUMBER("Heure fixe ouverture (h)", "hfx_ouv_h", TOPIC_HFX_OUV_H,
+    "\"min\":0,\"max\":23,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\""));
 
-  // ── Number : heure fixe fermeture (H) ──────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/hfx_fer_h/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Heure fixe fermeture (h)\",\"unique_id\":\"poulailler_hfx_fer_h\","
-    "\"command_topic\":\"" TOPIC_HFX_FER_H "\",\"state_topic\":\"" TOPIC_HFX_FER_H "\","
-    "\"min\":0,\"max\":23,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\","
-    "%s}", HA_DEVICE);
-  mqtt.publish(topic, buf, true);
+  ok &= publierEntite("number", "hfx_ouv_m", NUMBER("Minute fixe ouverture", "hfx_ouv_m", TOPIC_HFX_OUV_M,
+    "\"min\":0,\"max\":59,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\""));
 
-  // ── Number : heure fixe fermeture (M) ──────────────────────
-  snprintf(topic, sizeof(topic), HA_PREFIX "/number/poulailler/hfx_fer_m/config");
-  snprintf(buf, sizeof(buf),
-    "{\"name\":\"Minute fixe fermeture\",\"unique_id\":\"poulailler_hfx_fer_m\","
-    "\"command_topic\":\"" TOPIC_HFX_FER_M "\",\"state_topic\":\"" TOPIC_HFX_FER_M "\","
-    "\"min\":0,\"max\":59,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\","
-    "%s}", HA_DEVICE);
-  bool ok = mqtt.publish(topic, buf, true);
+  ok &= publierEntite("number", "hfx_fer_h", NUMBER("Heure fixe fermeture (h)", "hfx_fer_h", TOPIC_HFX_FER_H,
+    "\"min\":0,\"max\":23,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\""));
 
-  if (ok) Serial.println("[MQTT] Discovery publié");
-  else    Serial.println("[MQTT] Discovery ÉCHEC — buffer trop petit ?");
+  ok &= publierEntite("number", "hfx_fer_m", NUMBER("Minute fixe fermeture", "hfx_fer_m", TOPIC_HFX_FER_M,
+    "\"min\":0,\"max\":59,\"step\":1,\"mode\":\"box\",\"icon\":\"mdi:clock-outline\""));
+
+  Serial.println(ok ? "[MQTT] Discovery publié" : "[MQTT] Discovery : au moins une entité en échec");
 }
 
 // ============================================================
@@ -1072,9 +1122,8 @@ void setup() {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   setenv("TZ", TZ_INFO, 1);
   tzset();
-  struct tm timeinfo; t = 0;
-  while (!getLocalTime(&timeinfo) && t < 10) { delay(1000); t++; }
-  if (getLocalTime(&timeinfo))
+  struct tm timeinfo;
+  if (getLocalTime(&timeinfo, 10000))   // attente max 10 s (au lieu de 10 × 6 s)
     Serial.printf("[NTP] %02d/%02d/%04d %02d:%02d\n",
       timeinfo.tm_mday, timeinfo.tm_mon+1, timeinfo.tm_year+1900,
       timeinfo.tm_hour, timeinfo.tm_min);
@@ -1083,7 +1132,8 @@ void setup() {
   if (MQTT_ENABLED) {
     mqtt.setServer(MQTT_SERVER, MQTT_PORT);
     mqtt.setCallback(mqttCallback);
-    mqtt.setBufferSize(768);  // défaut 256 trop petit pour les messages Discovery HA
+    mqtt.setBufferSize(1024);  // défaut 256 trop petit : Discovery HA (768) + topic + en-tête
+    mqtt.setSocketTimeout(3);  // limite l'attente de réponse du broker
     connecterMQTT();
   }
 
@@ -1093,7 +1143,6 @@ void setup() {
   // OTA — mise à jour sans fil
   setupOTA();
 
-  publishHeuresSoleil();
   Serial.println("=== Prêt ===");
 }
 
@@ -1104,9 +1153,13 @@ void loop() {
   // OTA — écoute les demandes de mise à jour
   ArduinoOTA.handle();
 
-  // MQTT
+  // Commandes reçues de la page web : exécutées ici, pas dans la tâche réseau
+  traiterFileWeb();
+
+  // MQTT — pas de tentative de reconnexion pendant un mouvement :
+  // connect() peut bloquer plusieurs secondes et les fins de course ne seraient plus lues
   if (MQTT_ENABLED) {
-    if (!mqtt.connected()) {
+    if (!mqtt.connected() && !enMouvement()) {
       static unsigned long derniereTentative = 0;
       if (millis() - derniereTentative > 5000) {
         derniereTentative = millis();
@@ -1119,7 +1172,8 @@ void loop() {
   // WebSocket
   ws.cleanupClients();
   static unsigned long dernierBroadcast = 0;
-  if (millis() - dernierBroadcast > 2000) {
+  if (wsBroadcastDemande || millis() - dernierBroadcast > 2000) {
+    wsBroadcastDemande = false;
     dernierBroadcast = millis();
     wsBroadcastState();
   }
@@ -1135,7 +1189,6 @@ void loop() {
     publishEtat();
     publishHeuresSoleil();
     wsLog("Porte ouverte — fin de course gauche atteint", "ok");
-    appliquerModePending();
   }
   else if (etatPorte == PORTE_EN_FERMETURE && fdcFer) {
     stopMoteur();
@@ -1143,36 +1196,28 @@ void loop() {
     Serial.println("[FDC] Porte fermée ✓ (position droite)");
     publishEtat();
     wsLog("Porte fermée — fin de course droit atteint", "ok");
-    appliquerModePending();
   }
 
   // ── Sécurité — stopper le moteur si état non-mouvement ────
-  if (etatPorte != PORTE_EN_OUVERTURE && etatPorte != PORTE_EN_FERMETURE) {
-    ledcWrite(PIN_RPWM, 0);
-    ledcWrite(PIN_LPWM, 0);
+  if (!enMouvement()) stopMoteur();
+
+  // ── Timeout et surintensité ──────────────────────────────
+  if (enMouvement()) {
+    unsigned long ecoule  = millis() - tempsDebutMouvement;
+    unsigned long timeout = (etatPorte == PORTE_EN_OUVERTURE) ? TIMEOUT_OUV_MS : TIMEOUT_FER_MS;
+    if (ecoule > timeout) {
+      passerEnErreur("Timeout moteur — fin de course non atteint");
+    }
+    // Pic de démarrage ignoré, puis plusieurs mesures consécutives exigées
+    else if (ecoule > RAMPE_MS + SURCOURANT_MASQUAGE_MS) {
+      if (!surcourant())                                        compteurSurcourant = 0;
+      else if (++compteurSurcourant >= SURCOURANT_CONFIRMATIONS) passerEnErreur("Surcourant — obstacle détecté, moteur arrêté");
+    }
   }
 
-  // ── Timeout moteur ───────────────────────────────────────
-  if (etatPorte == PORTE_EN_OUVERTURE || etatPorte == PORTE_EN_FERMETURE) {
-    unsigned long timeoutActuel = (etatPorte == PORTE_EN_OUVERTURE) ? TIMEOUT_OUV_MS : TIMEOUT_FER_MS;
-    if (millis() - tempsDebutMouvement > timeoutActuel) {
-      stopMoteur();
-      etatPorte = PORTE_ERREUR;
-      Serial.println("[TIMEOUT] Fin de course non atteint !");
-      if (MQTT_ENABLED) mqtt.publish(TOPIC_ETAT_PORTE, "error", true);
-      wsLog("Timeout moteur — vérifier les fins de course", "error");
-    }
-    // ── Surcourant (blocage) ─────────────────────────────
-    if (surcourant()) {
-      ledcWrite(PIN_RPWM, 0);   // stop immédiat sans rampe
-      ledcWrite(PIN_LPWM, 0);
-      stopMoteur();
-      etatPorte = PORTE_ERREUR;
-      Serial.println("[SURCOURANT] Blocage détecté !");
-      if (MQTT_ENABLED) mqtt.publish(TOPIC_ETAT_PORTE, "error", true);
-      wsLog("Surcourant — obstacle détecté, moteur arrêté", "error");
-    }
-  }
+  // Mode demandé pendant un mouvement : appliqué dès que la porte est immobile
+  // (fin de course, erreur ou stop)
+  if (modePendingActif && !enMouvement()) appliquerModePending();
 
   // ── Gestion automatique (toutes les 60 s) ────────────────
   if (millis() - dernierCheckAuto > 60000) {
@@ -1180,7 +1225,6 @@ void loop() {
     switch (modeActuel) {
       case MODE_SOLEIL:     gestionSoleil();     break;
       case MODE_HEURE_FIXE: gestionHeureFixe();  break;
-      case MODE_MANUEL:     break;
       default: break;
     }
   }
@@ -1205,5 +1249,5 @@ void loop() {
     }
   }
 
-  delay(100);
+  delay(10);  // boucle rapide : fins de course lues toutes les ~10-20 ms
 }
