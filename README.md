@@ -1,4 +1,4 @@
-# 🐔 Porte de poulailler automatique — Rétrofit Porte marque Omlet (FR) mais compatible à tous projets DIY
+# 🐔 Porte de poulailler automatique - Compatible Home Assistant — Rétrofit Porte marque Omlet (FR) mais compatible à tous projets DIY
 [English version available below](#-automatic-chicken-coop-door--omlet-autodoor-retrofit---english-version)
 
 Contrôleur basé sur ESP32 pour automatiser une porte de poulailler coulissante, en récupérant la mécanique d'une porte Omlet Autodoor existante. 
