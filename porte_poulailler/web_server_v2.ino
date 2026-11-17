@@ -11,6 +11,7 @@
 
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
+#include "icones_web.h"  // icônes PNG (raccourci écran d'accueil)
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -24,6 +25,9 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0e1521">
 <title>Poulailler</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <style>
 :root{
   --bg:#0e1521;--card:#162032;--card2:#1d2a40;--line:#2b3a55;
@@ -377,7 +381,7 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
     <ul class="log" id="logList"></ul>
   </section>
 
-  <footer>ESP32 · mise à jour en direct</footer>
+  <footer><span id="wifiInfo">Wi-Fi —</span><br>ESP32 · mise à jour en direct</footer>
 </main>
 
 <script>
@@ -587,7 +591,7 @@ function majSousTitre(h) {
 // ── Messages ESP32 ───────────────────────────────────────────
 function handleMsg(d) {
   if (d.heure !== undefined) { $('heureEsp').textContent = d.heure; nowMin = toMin(d.heure); }
-  if (d.rssi !== undefined) majRssi(d.rssi);
+  if (d.rssi !== undefined) majRssi(d.rssi, d.ssid);
   if (d.porte !== undefined) mettreAJourPorte(d.porte);
   if (d.mode !== undefined) mettreAJourMode(d.mode, d.mode_pending);
   if (d.lever !== undefined)   { $('hLever').textContent = d.lever;     leverMin = toMin(d.lever); }
@@ -637,17 +641,21 @@ function majFdc(id, actif) {
   $(id).textContent = actif ? 'Atteint' : 'Libre';
   $(id + 'Box').className = actif ? 'on' : '';
 }
-function majRssi(r) {
+function majRssi(r, ssid) {
   const bars = $('rssiEsp').children;
-  let n, c;
-  if (r === 0)       { n = 0; c = 'var(--muted)'; }
-  else if (r >= -60) { n = 4; c = 'var(--open)'; }
-  else if (r >= -70) { n = 3; c = 'var(--open)'; }
-  else if (r >= -80) { n = 2; c = 'var(--yolk)'; }
-  else               { n = 1; c = 'var(--err)'; }
+  let n, c, q;
+  if (r === 0)       { n = 0; c = 'var(--muted)'; q = ''; }
+  else if (r >= -60) { n = 4; c = 'var(--open)'; q = 'excellent'; }
+  else if (r >= -70) { n = 3; c = 'var(--open)'; q = 'bon'; }
+  else if (r >= -80) { n = 2; c = 'var(--yolk)'; q = 'moyen'; }
+  else               { n = 1; c = 'var(--err)'; q = 'faible'; }
   for (let i = 0; i < 4; i++) bars[i].style.background = i < n ? c : 'var(--line)';
   $('rssiVal').textContent = r ? r : '';
   $('rssiEsp').title = r ? r + ' dBm' : 'Pas de Wi-Fi';
+  // Pied de page : réseau + force du signal (textContent : pas d'injection HTML via le SSID)
+  $('wifiInfo').textContent = r
+    ? 'Wi-Fi « ' + (ssid || '?') + ' » · ' + r + ' dBm (' + q + ')'
+    : 'Wi-Fi non connecté';
 }
 
 // ── État porte ───────────────────────────────────────────────
@@ -779,7 +787,21 @@ void wsBroadcastState() {
   if (heureOk) snprintf(heureStr, sizeof(heureStr), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
   else         snprintf(heureStr, sizeof(heureStr), "--:--");
 
-  char buf[800];
+  // SSID échappé pour le JSON (32 caractères max, " et \ doublés, contrôles ignorés)
+  char ssidJson[65] = "";
+  if (WiFi.status() == WL_CONNECTED) {
+    String ssid = WiFi.SSID();
+    size_t j = 0;
+    for (size_t i = 0; i < ssid.length() && j < sizeof(ssidJson) - 2; i++) {
+      char ch = ssid[i];
+      if ((unsigned char)ch < 0x20) continue;
+      if (ch == '"' || ch == '\\') ssidJson[j++] = '\\';
+      ssidJson[j++] = ch;
+    }
+    ssidJson[j] = '\0';
+  }
+
+  char buf[900];
   snprintf(buf, sizeof(buf),
     "{\"heure\":\"%s\","
     "\"porte\":\"%s\","
@@ -801,6 +823,7 @@ void wsBroadcastState() {
     "\"conf_pct\":%d,"
     "\"force_manuel\":%s,"
     "\"rssi\":%d,"
+    "\"ssid\":\"%s\","
     "\"fdc_ouv\":%s,"
     "\"fdc_fer\":%s"
     "}",
@@ -824,6 +847,7 @@ void wsBroadcastState() {
     confPct,
     forceManuel ? "true" : "false",
     (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0,
+    ssidJson,
     digitalRead(PIN_FDC_OUV) == LOW  ? "true" : "false",
     digitalRead(PIN_FDC_FER) == LOW  ? "true" : "false"
   );
@@ -914,6 +938,25 @@ void setupWebServer() {
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
     req->send_P(200, "text/html", HTML_PAGE);
+  });
+
+  // Icônes et manifeste : permettent un raccourci « écran d'accueil » avec icône
+  server.on("/icon-192.png", HTTP_GET, [](AsyncWebServerRequest* req) {
+    AsyncWebServerResponse* r = req->beginResponse(200, "image/png", ICONE_192, ICONE_192_LEN);
+    r->addHeader("Cache-Control", "max-age=604800");
+    req->send(r);
+  });
+  server.on("/icon-512.png", HTTP_GET, [](AsyncWebServerRequest* req) {
+    AsyncWebServerResponse* r = req->beginResponse(200, "image/png", ICONE_512, ICONE_512_LEN);
+    r->addHeader("Cache-Control", "max-age=604800");
+    req->send(r);
+  });
+  server.on("/manifest.json", HTTP_GET, [](AsyncWebServerRequest* req) {
+    req->send(200, "application/manifest+json",
+      "{\"name\":\"Poulailler\",\"short_name\":\"Poulailler\",\"start_url\":\"/\","
+      "\"display\":\"standalone\",\"background_color\":\"#0e1521\",\"theme_color\":\"#0e1521\","
+      "\"icons\":[{\"src\":\"/icon-192.png\",\"sizes\":\"192x192\",\"type\":\"image/png\",\"purpose\":\"any maskable\"},"
+      "{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\",\"purpose\":\"any maskable\"}]}");
   });
 
   server.begin();
