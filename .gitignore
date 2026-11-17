@@ -8,3 +8,6 @@ porte_poulailler/secrets.h
 web_preview_v2.html
 guide_cablage_poulailler.docx
 tests/
+
+# Sorties de compilation arduino-cli
+porte_poulailler/build/
