@@ -29,6 +29,7 @@
 #include <BH1750.h>
 #include <time.h>
 #include <math.h>
+#include <esp_system.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
 
@@ -52,25 +53,42 @@ void publishParams();
 void paramModifie();
 void publishHeuresSoleil();
 void traiterFileWeb();
+void demanderRedemarrage();
 
 // ============================================================
-//  CONFIGURATION — À MODIFIER
+//  CONFIGURATION
 // ============================================================
-#define MQTT_ENABLED  true   // true = MQTT actif, false = désactivé
-
-// Identifiants et position dans secrets.h (non publié — voir secrets.h.example)
+// Identifiants et position par défaut dans secrets.h (non publié — voir secrets.h.example).
+// Ils servent au premier démarrage et de secours ; ils sont ensuite modifiables depuis
+// l'onglet « Réglages » de la page web (stockés en NVS, espace « reseau »).
 #include "secrets.h"
 
-const char* WIFI_SSID     = SECRET_WIFI_SSID;
-const char* WIFI_PASSWORD = SECRET_WIFI_PASSWORD;
+#define MQTT_ACTIF_DEFAUT  true   // MQTT actif tant qu'il n'est pas désactivé dans les réglages
 
-const char* MQTT_SERVER   = SECRET_MQTT_SERVER;
-const int   MQTT_PORT     = 1883;
-const char* MQTT_USER     = SECRET_MQTT_USER;
-const char* MQTT_PASS     = SECRET_MQTT_PASS;
+// Point d'accès de secours (si aucun Wi-Fi n'est joignable au démarrage)
+#define AP_SSID  "Poulailler-Config"
+#ifndef SECRET_AP_PASSWORD
+#define SECRET_AP_PASSWORD  "poulailler"   // WPA2 : 8 caractères minimum
+#endif
 
-const float LATITUDE      = SECRET_LATITUDE;
-const float LONGITUDE     = SECRET_LONGITUDE;
+#define LEN_SSID   33     // 32 caractères + \0
+#define LEN_MDP    64     // 63 caractères + \0
+#define LEN_HOTE   64
+#define LEN_MDP_WEB 33    // 32 caractères max (ASCII imprimable)
+#define MDP_WEB_MIN 6
+
+struct ReseauCfg {
+  char  wifiSsid[LEN_SSID];
+  char  wifiPass[LEN_MDP];
+  bool  mqttOn;
+  char  mqttHost[LEN_HOTE];
+  int   mqttPort;
+  char  mqttUser[LEN_SSID];
+  char  mqttPass[LEN_MDP];
+  float lat, lon;                // position GPS (calcul lever/coucher du soleil)
+  char  webPass[LEN_MDP_WEB];    // mot de passe de l'onglet Réglages ("" = aucun)
+};
+ReseauCfg reseau;                // valeurs courantes (défauts secrets.h puis NVS)
 
 const char* TZ_INFO = "CET-1CEST,M3.5.0,M10.5.0/3";  // France — heure été/hiver automatique // Winter/Summer timer France by default
 
@@ -577,6 +595,170 @@ bool appliquerConfigJson(JsonDocument& doc) {
 }
 
 // ============================================================
+//  RÉSEAU / POSITION / MOT DE PASSE (NVS, espace « reseau »)
+// ============================================================
+// Valeurs d'usine (secrets.h) puis surcharge par ce qui a été enregistré depuis la page web
+void chargerReseau() {
+  memset(&reseau, 0, sizeof(reseau));
+  strlcpy(reseau.wifiSsid, SECRET_WIFI_SSID,     sizeof(reseau.wifiSsid));
+  strlcpy(reseau.wifiPass, SECRET_WIFI_PASSWORD, sizeof(reseau.wifiPass));
+  reseau.mqttOn   = MQTT_ACTIF_DEFAUT;
+  strlcpy(reseau.mqttHost, SECRET_MQTT_SERVER,   sizeof(reseau.mqttHost));
+  reseau.mqttPort = 1883;
+  strlcpy(reseau.mqttUser, SECRET_MQTT_USER,     sizeof(reseau.mqttUser));
+  strlcpy(reseau.mqttPass, SECRET_MQTT_PASS,     sizeof(reseau.mqttPass));
+  reseau.lat = SECRET_LATITUDE;
+  reseau.lon = SECRET_LONGITUDE;
+
+  if (!prefs.begin("reseau", true)) { Serial.println("[NVS] Réseau : valeurs par défaut (secrets.h)"); return; }
+  if (prefs.isKey("wSsid"))  prefs.getString("wSsid", reseau.wifiSsid, sizeof(reseau.wifiSsid));
+  if (prefs.isKey("wPass"))  prefs.getString("wPass", reseau.wifiPass, sizeof(reseau.wifiPass));
+  if (prefs.isKey("mOn"))    reseau.mqttOn   = prefs.getBool("mOn", reseau.mqttOn);
+  if (prefs.isKey("mHost"))  prefs.getString("mHost", reseau.mqttHost, sizeof(reseau.mqttHost));
+  if (prefs.isKey("mPort"))  reseau.mqttPort = prefs.getInt("mPort", reseau.mqttPort);
+  if (prefs.isKey("mUser"))  prefs.getString("mUser", reseau.mqttUser, sizeof(reseau.mqttUser));
+  if (prefs.isKey("mPass"))  prefs.getString("mPass", reseau.mqttPass, sizeof(reseau.mqttPass));
+  if (prefs.isKey("lat"))    reseau.lat      = prefs.getFloat("lat", reseau.lat);
+  if (prefs.isKey("lon"))    reseau.lon      = prefs.getFloat("lon", reseau.lon);
+  if (prefs.isKey("webPass")) prefs.getString("webPass", reseau.webPass, sizeof(reseau.webPass));
+  prefs.end();
+
+  // Valeurs NVS corrompues → ramenées dans les limites
+  reseau.mqttPort = borner(reseau.mqttPort, 1, 65535);
+  if (!(reseau.lat >= -90.0f  && reseau.lat <= 90.0f))   reseau.lat = SECRET_LATITUDE;
+  if (!(reseau.lon >= -180.0f && reseau.lon <= 180.0f))  reseau.lon = SECRET_LONGITUDE;
+  Serial.println("[NVS] Réseau chargé");
+}
+
+void sauvegarderReseau() {
+  prefs.begin("reseau", false);
+  prefs.putString("wSsid", reseau.wifiSsid);
+  prefs.putString("wPass", reseau.wifiPass);
+  prefs.putBool("mOn",     reseau.mqttOn);
+  prefs.putString("mHost", reseau.mqttHost);
+  prefs.putInt("mPort",    reseau.mqttPort);
+  prefs.putString("mUser", reseau.mqttUser);
+  prefs.putString("mPass", reseau.mqttPass);
+  prefs.putFloat("lat",    reseau.lat);
+  prefs.putFloat("lon",    reseau.lon);
+  prefs.putString("webPass", reseau.webPass);
+  prefs.end();
+  Serial.println("[NVS] Réseau sauvegardé");
+}
+
+// Redémarrage différé : laisse partir la réponse HTTP, et attend que la porte soit immobile
+static volatile bool redemarrageDemande = false;
+static unsigned long redemarrageInstant = 0;
+void demanderRedemarrage() { redemarrageDemande = true; }
+
+void gererRedemarrage() {
+  if (!redemarrageDemande || enMouvement()) return;
+  if (redemarrageInstant == 0) { redemarrageInstant = millis(); return; }
+  if (millis() - redemarrageInstant < 1500) return;
+  Serial.println("[SYS] Redémarrage demandé");
+  Serial.flush();
+  ESP.restart();
+}
+
+// Applique une configuration validée (appelé depuis loop(), porte immobile)
+void appliquerReseau(const ReseauCfg& n) {
+  bool wifiChg = strcmp(n.wifiSsid, reseau.wifiSsid) != 0 || strcmp(n.wifiPass, reseau.wifiPass) != 0;
+  bool mqttChg = n.mqttOn != reseau.mqttOn || n.mqttPort != reseau.mqttPort
+              || strcmp(n.mqttHost, reseau.mqttHost) != 0
+              || strcmp(n.mqttUser, reseau.mqttUser) != 0
+              || strcmp(n.mqttPass, reseau.mqttPass) != 0;
+  bool posChg  = n.lat != reseau.lat || n.lon != reseau.lon;
+  bool mdpChg  = strcmp(n.webPass, reseau.webPass) != 0;
+  if (!wifiChg && !mqttChg && !posChg && !mdpChg) return;   // rien de nouveau : pas d'écriture flash
+
+  reseau = n;
+  sauvegarderReseau();
+  if (posChg) {            // position : appliquée tout de suite (recalcul lever/coucher)
+    publishHeuresSoleil();
+    wsBroadcastState();
+    wsLog("Position GPS mise à jour", "ok");
+  }
+  if (mdpChg) wsLog("Mot de passe des réglages modifié", "ok");
+  if (wifiChg || mqttChg) {
+    wsLog("Réglages réseau enregistrés — redémarrage", "warn");
+    demanderRedemarrage();
+  }
+}
+
+// File d'une demande de réglages (1 place) : remplie par la tâche réseau, vidée par loop()
+static QueueHandle_t fileReseau = nullptr;
+void traiterFileReseau() {
+  if (fileReseau == nullptr || enMouvement()) return;   // en attente tant que la porte bouge
+  ReseauCfg n;
+  if (xQueueReceive(fileReseau, &n, 0) == pdTRUE) appliquerReseau(n);
+}
+
+// ============================================================
+//  WI-FI — connexion, repli et point d'accès de secours
+// ============================================================
+static volatile bool apActif = false;
+static char wifiSsidActif[LEN_SSID] = "";   // identifiants qui ont réellement fonctionné
+static char wifiPassActif[LEN_MDP]  = "";
+
+bool essayerWifi(const char* ssid, const char* pass) {
+  if (ssid[0] == '\0') return false;
+  Serial.printf("[WiFi] Connexion à %s...", ssid);
+  WiFi.disconnect();
+  WiFi.begin(ssid, pass);
+  int t = 0;
+  while (WiFi.status() != WL_CONNECTED && t < 30) { delay(500); Serial.print("."); t++; }
+  if (WiFi.status() != WL_CONNECTED) { Serial.println(" échec"); return false; }
+  Serial.printf("\n[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+  strlcpy(wifiSsidActif, ssid, sizeof(wifiSsidActif));
+  strlcpy(wifiPassActif, pass, sizeof(wifiPassActif));
+  return true;
+}
+
+void demarrerPointAcces() {
+  WiFi.mode(WIFI_AP_STA);
+  if (WiFi.softAP(AP_SSID, SECRET_AP_PASSWORD)) {
+    apActif = true;
+    Serial.printf("[WiFi] Point d'accès « %s » — http://%s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  } else {
+    Serial.println("[WiFi] Point d'accès : échec");
+  }
+}
+
+// Démarrage : Wi-Fi des réglages → Wi-Fi de secrets.h → point d'accès « Poulailler-Config »
+void connecterWifi() {
+  if (essayerWifi(reseau.wifiSsid, reseau.wifiPass)) return;
+  bool memes = strcmp(reseau.wifiSsid, SECRET_WIFI_SSID) == 0 && strcmp(reseau.wifiPass, SECRET_WIFI_PASSWORD) == 0;
+  if (!memes) {
+    Serial.println("[WiFi] Réglages injoignables — essai avec secrets.h");
+    if (essayerWifi(SECRET_WIFI_SSID, SECRET_WIFI_PASSWORD)) return;
+  }
+  Serial.println("[WiFi] Échec — mode hors ligne");
+  demarrerPointAcces();
+}
+
+// loop() : coupe le point d'accès dès que le Wi-Fi est revenu, sinon retente de temps en temps
+void surveillerWifi() {
+  static unsigned long dernierEssai = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    if (apActif) {
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      apActif = false;
+      Serial.println("[WiFi] Wi-Fi rétabli — point d'accès coupé");
+    }
+    return;
+  }
+  if (enMouvement()) return;
+  unsigned long delai = apActif ? 300000UL : 60000UL;   // 5 min avec le point d'accès (évite de le perturber)
+  if (millis() - dernierEssai < delai) return;
+  dernierEssai = millis();
+  const char* ssid = wifiSsidActif[0] ? wifiSsidActif : reseau.wifiSsid;
+  const char* pass = wifiSsidActif[0] ? wifiPassActif : reseau.wifiPass;
+  Serial.printf("[WiFi] Nouvelle tentative vers %s\n", ssid);
+  WiFi.begin(ssid, pass);   // non bloquant
+}
+
+// ============================================================
 //  OVERRIDE MANUEL — suspend l'auto jusqu'à la prochaine échéance
 // ============================================================
 void activerForceManuel() {
@@ -593,7 +775,7 @@ void activerForceManuel() {
       int maintenant = t.tm_hour * 60 + t.tm_min;
       int heureOuv, heureFer;
       if (modeActuel == MODE_SOLEIL) {
-        HeureSoleil s = calculSoleil(t.tm_year+1900, t.tm_mon+1, t.tm_mday, LATITUDE, LONGITUDE);
+        HeureSoleil s = calculSoleil(t.tm_year+1900, t.tm_mon+1, t.tm_mday, reseau.lat, reseau.lon);
         heureOuv = heureEnMinutes(s.leverH,   s.leverM,   offsetOuv);
         heureFer = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
       } else {
@@ -642,7 +824,7 @@ void appliquerPlage(int maintenant, int heureOuv, int heureFer) {
 void gestionSoleil() {
   if (overrideActif()) return;
   struct tm t; if (!heureLocale(&t)) return;
-  HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, LATITUDE, LONGITUDE);
+  HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, reseau.lat, reseau.lon);
   appliquerPlage(t.tm_hour * 60 + t.tm_min,
                  heureEnMinutes(s.leverH,   s.leverM,   offsetOuv),
                  heureEnMinutes(s.coucherH, s.coucherM, offsetFer));
@@ -722,7 +904,7 @@ const char* wifiQualiteTexte(int rssi) {
 }
 
 void publishWifi() {
-  if (!MQTT_ENABLED) return;
+  if (!reseau.mqttOn) return;
   if (WiFi.status() != WL_CONNECTED) return;
   int rssi = WiFi.RSSI();
   char buf[16];
@@ -736,7 +918,7 @@ void publishWifi() {
 //  MQTT
 // ============================================================
 void publishEtat() {
-  if (!MQTT_ENABLED || !mqtt.connected()) return;
+  if (!reseau.mqttOn || !mqtt.connected()) return;
   mqtt.publish(TOPIC_ETAT_PORTE, etatVersStr(etatPorte), true);
 
   // État en texte lisible (pour capteur HA)
@@ -757,7 +939,7 @@ void publishEtat() {
 
 // Publie l'état de tous les paramètres réglables (pour les entités number HA)
 void publishParams() {
-  if (!MQTT_ENABLED) return;
+  if (!reseau.mqttOn) return;
   char b[12];
   snprintf(b, sizeof(b), "%d", offsetOuv);           mqtt.publish(TOPIC_OFFSET_OUV, b, true);
   snprintf(b, sizeof(b), "%d", offsetFer);           mqtt.publish(TOPIC_OFFSET_FER, b, true);
@@ -771,12 +953,12 @@ void publishParams() {
 }
 
 void publishMode() {
-  if (!MQTT_ENABLED) return;
+  if (!reseau.mqttOn) return;
   mqtt.publish(TOPIC_MODE, MODES_STR[modeActuel], false);  // pas de retain — évite les boucles
 }
 
 void publishCapteurs() {
-  if (!MQTT_ENABLED) return;
+  if (!reseau.mqttOn) return;
   float lux = bh1750.readLightLevel();
   float amp = lireCourant();
   char buf[32];
@@ -787,9 +969,9 @@ void publishCapteurs() {
 }
 
 void publishHeuresSoleil() {
-  if (!MQTT_ENABLED) return;
+  if (!reseau.mqttOn) return;
   struct tm t; if (!heureLocale(&t)) return;
-  HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, LATITUDE, LONGITUDE);
+  HeureSoleil s = calculSoleil(t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, reseau.lat, reseau.lon);
   int ouvMin = heureEnMinutes(s.leverH,   s.leverM,   offsetOuv);
   int ferMin = heureEnMinutes(s.coucherH, s.coucherM, offsetFer);
   char buf[256];
@@ -885,11 +1067,13 @@ void paramModifie() {
 }
 
 bool connecterMQTT() {
-  if (!MQTT_ENABLED) return true;
+  if (!reseau.mqttOn) return true;
   if (mqtt.connected()) return true;
   Serial.print("[MQTT] Connexion...");
   // LWT sur un topic de disponibilité dédié (et non sur l'état de la porte)
-  if (mqtt.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS,
+  if (mqtt.connect(MQTT_CLIENT_ID,
+                   reseau.mqttUser[0] ? reseau.mqttUser : nullptr,
+                   reseau.mqttUser[0] ? reseau.mqttPass : nullptr,
                    TOPIC_DISPO, 1, true, "offline")) {
     Serial.println(" OK");
     mqtt.subscribe(TOPIC_COMMANDE_PORTE);
@@ -948,7 +1132,7 @@ bool publierEntite(const char* type, const char* id, const char* corps) {
   "\"command_topic\":\"" topic "\",\"state_topic\":\"" topic "\"," bornes
 
 void publishDiscovery() {
-  if (!MQTT_ENABLED) return;
+  if (!reseau.mqttOn) return;
   bool ok = true;
 
   ok &= publierEntite("cover", "porte",
@@ -1073,11 +1257,32 @@ void setupOTA() {
 }
 
 // ============================================================
+//  DIAGNOSTIC SYSTÈME
+// ============================================================
+#define FIRMWARE_VERSION  __DATE__ " " __TIME__   // date de compilation
+
+const char* causeRedemarrage() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "Mise sous tension";
+    case ESP_RST_SW:        return "Redémarrage logiciel";
+    case ESP_RST_PANIC:     return "Plantage du programme";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:       return "Chien de garde (blocage)";
+    case ESP_RST_BROWNOUT:  return "Chute de tension";
+    case ESP_RST_EXT:       return "Bouton reset";
+    case ESP_RST_DEEPSLEEP: return "Sortie de veille";
+    default:                return "Inconnue";
+  }
+}
+
+// ============================================================
 //  SETUP
 // ============================================================
 void setup() {
   Serial.begin(115200);
   Serial.println("\n=== PORTE POULAILLER v2 — Démarrage ===");
+  Serial.printf("[SYS] Cause du démarrage : %s\n", causeRedemarrage());
 
   // Moteur
   // ESP32 Arduino v3.x : nouvelle API PWM (ledcAttach remplace ledcSetup+ledcAttachPin)
@@ -1101,6 +1306,8 @@ void setup() {
 
   // Charger la config depuis NVS (mode, offsets, seuils)
   chargerConfig();
+  chargerReseau();
+  fileReseau = xQueueCreate(1, sizeof(ReseauCfg));
 
   // État initial — détection position via fins de course
   delay(100);
@@ -1108,15 +1315,8 @@ void setup() {
   else if (digitalRead(PIN_FDC_FER) == LOW)  { etatPorte = PORTE_FERMEE;  Serial.println("[INIT] Porte FERMÉE (droite)");  }
   else                                        { etatPorte = PORTE_ERREUR;  Serial.println("[INIT] Position inconnue");       }
 
-  // WiFi
-  Serial.printf("[WiFi] Connexion à %s...", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  int t = 0;
-  while (WiFi.status() != WL_CONNECTED && t < 30) { delay(500); Serial.print("."); t++; }
-  if (WiFi.status() == WL_CONNECTED)
-    Serial.printf("\n[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-  else
-    Serial.println("\n[WiFi] Échec — mode hors ligne");
+  // WiFi (réglages enregistrés, puis secrets.h, puis point d'accès de secours)
+  connecterWifi();
 
   // NTP
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -1129,12 +1329,12 @@ void setup() {
       timeinfo.tm_hour, timeinfo.tm_min);
 
   // MQTT
-  if (MQTT_ENABLED) {
-    mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  if (reseau.mqttOn) {
+    mqtt.setServer(reseau.mqttHost, reseau.mqttPort);
     mqtt.setCallback(mqttCallback);
     mqtt.setBufferSize(1024);  // défaut 256 trop petit : Discovery HA (768) + topic + en-tête
     mqtt.setSocketTimeout(3);  // limite l'attente de réponse du broker
-    connecterMQTT();
+    if (WiFi.status() == WL_CONNECTED) connecterMQTT();
   }
 
   // Serveur web
@@ -1155,11 +1355,14 @@ void loop() {
 
   // Commandes reçues de la page web : exécutées ici, pas dans la tâche réseau
   traiterFileWeb();
+  traiterFileReseau();
+  gererRedemarrage();
+  surveillerWifi();
 
   // MQTT — pas de tentative de reconnexion pendant un mouvement :
   // connect() peut bloquer plusieurs secondes et les fins de course ne seraient plus lues
-  if (MQTT_ENABLED) {
-    if (!mqtt.connected() && !enMouvement()) {
+  if (reseau.mqttOn) {
+    if (!mqtt.connected() && !enMouvement() && WiFi.status() == WL_CONNECTED) {
       static unsigned long derniereTentative = 0;
       if (millis() - derniereTentative > 5000) {
         derniereTentative = millis();

@@ -38,7 +38,7 @@ const char HTML_PAGE[] PROGMEM = R"rawhtml(
 *{box-sizing:border-box;margin:0;padding:0}
 [hidden]{display:none!important}
 html{-webkit-text-size-adjust:100%}
-body{background:var(--bg);color:var(--text);font:400 15px/1.4 var(--font);min-height:100vh;padding-bottom:40px;font-variant-numeric:tabular-nums}
+body{background:var(--bg);color:var(--text);font:400 15px/1.4 var(--font);min-height:100vh;padding-bottom:calc(88px + env(safe-area-inset-bottom));font-variant-numeric:tabular-nums}
 button,input{font:inherit;color:inherit}
 button{cursor:pointer;-webkit-tap-highlight-color:transparent;user-select:none;touch-action:manipulation}
 :focus-visible{outline:2px solid var(--yolk);outline-offset:2px}
@@ -187,6 +187,42 @@ canvas{width:100%;height:100%;display:block}
 .empty{color:var(--muted);font-size:14px}
 footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
 
+/* ── Onglets ── */
+.page,.page>form{display:flex;flex-direction:column;gap:14px}
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:10;background:rgba(14,21,33,.94);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
+.tabs-in{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.tabs a{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;min-height:58px;padding:9px 2px 8px;color:var(--muted);text-decoration:none;font-size:11px;font-weight:600}
+.tabs a[aria-current="page"]{color:var(--yolk)}
+.tabs a[aria-current="page"]::before{content:"";position:absolute;top:0;left:28%;right:28%;height:2px;border-radius:0 0 3px 3px;background:var(--yolk)}
+.tabs .ico{width:22px;height:22px}
+.modeline{display:flex;align-items:center;gap:8px;margin-top:14px;padding:10px 12px;border-radius:12px;background:var(--card2);color:var(--text);text-decoration:none;font-size:14px;font-weight:600}
+.modeline .ico{color:var(--yolk)}
+.modeline .chev{margin-left:auto;width:16px;height:16px;color:var(--muted)}
+
+/* ── Système ── */
+.kv>div{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:10px 0;font-size:14px}
+.kv>div+div{border-top:1px solid var(--line)}
+.kv dt{color:var(--muted);flex-shrink:0}
+.kv dd{font-weight:600;text-align:right;overflow-wrap:anywhere}
+
+/* ── Réglages ── */
+.field{display:flex;flex-direction:column;gap:6px;padding:6px 0}
+.field label{font-size:13px;font-weight:600;color:var(--muted)}
+.field input[type=text],.field input[type=password],.field input[type=number]{width:100%;height:46px;padding:0 12px;border-radius:12px;border:1.5px solid var(--line);background:var(--bg);font-size:16px;outline:none}
+.field input:focus{border-color:var(--yolk)}
+.field small,.hint{font-size:12px;color:var(--muted)}
+.hint{margin-top:6px}.hint.center{text-align:center}
+.two{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:10px}
+#reglForm .two:has(#fLat){grid-template-columns:repeat(2,minmax(0,1fr))}
+.chk{display:flex;align-items:center;gap:12px;padding:6px 0 10px;font-weight:600}
+.chk input{width:22px;height:22px;accent-color:var(--yolk)}
+.alert{padding:10px 12px;border-radius:12px;background:rgba(244,185,66,.1);border:1px solid rgba(244,185,66,.4);color:var(--yolk);font-size:13px}
+.msg{min-height:18px;font-size:13px}.msg.err{color:var(--err)}.msg.ok{color:var(--open)}
+.b-save{width:100%;min-height:52px;font-size:16px;color:#0e1521;background:var(--yolk);border-color:var(--yolk)}
+.b-ghost{width:100%;min-height:48px;font-size:14px;color:var(--muted);border-color:var(--line);background:transparent}
+.overlay{position:fixed;inset:0;z-index:20;display:grid;place-items:center;padding:24px;background:rgba(14,21,33,.92)}
+.overlay .card{max-width:360px}
+
 @media (max-width:340px){.seg{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -204,6 +240,10 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
   <symbol id="i-hand" viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-4 0M14 10V4a2 2 0 0 0-4 0v2M10 10.5V6a2 2 0 0 0-4 0v8M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-5.9-2.4L3.4 16a2 2 0 0 1 3.2-2.4L8 15"/></symbol>
   <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></symbol>
   <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-door" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8M5 10v10h14V10M10 20v-6h4v6"/></symbol>
+  <symbol id="i-cycle" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8M18 2v4h-4M6 22v-4h4"/></symbol>
+  <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M15 5v4M4 17h3M11 17h9M9 15v4"/></symbol>
   <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
 </svg>
 
@@ -220,6 +260,7 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
 
 <main>
 
+<div class="page" id="page-porte">
   <!-- ── Porte ── -->
   <section class="card hero" aria-label="État de la porte">
     <div class="scene init" id="scene" data-s="closed">
@@ -258,6 +299,7 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
         <p class="sub" id="porteSub">En attente…</p>
       </div>
       <div class="progress" id="progressBar"><i id="progressFill"></i></div>
+      <a class="modeline" href="#auto" id="modeLine"><svg class="ico"><use id="modeIcon" href="#i-sunrise"/></svg><span id="modeTxt">Mode Soleil</span><svg class="ico chev"><use href="#i-right"/></svg></a>
       <div class="badge" id="overrideBadge" hidden>Mode automatique suspendu : une commande manuelle est active.</div>
     </div>
   </section>
@@ -273,6 +315,10 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
     </div>
   </section>
 
+  <footer><span id="wifiInfo">Wi-Fi —</span><br>ESP32 · mise à jour en direct</footer>
+</div>
+
+<div class="page" id="page-auto" hidden>
   <!-- ── Mode ── -->
   <section class="card" aria-label="Mode de gestion">
     <h2>Mode de gestion</h2>
@@ -356,6 +402,9 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
     </div>
   </section>
 
+</div>
+
+<div class="page" id="page-diag" hidden>
   <!-- ── Capteurs ── -->
   <section class="card" aria-label="Capteurs">
     <h2>Capteurs</h2>
@@ -375,14 +424,106 @@ footer{text-align:center;font-size:12px;color:var(--muted);padding-top:4px}
     <div class="chart"><canvas id="chartCourant" role="img" aria-label="Historique du courant du moteur"></canvas></div>
   </section>
 
+  <!-- ── Système ── -->
+  <section class="card" aria-label="Système">
+    <h2>Système</h2>
+    <dl class="kv">
+      <div><dt>Fonctionne depuis</dt><dd id="sysUptime">--</dd></div>
+      <div><dt>Dernier démarrage</dt><dd id="sysReset">--</dd></div>
+      <div><dt>Mémoire libre</dt><dd id="sysHeap">--</dd></div>
+      <div><dt>Wi-Fi</dt><dd id="sysWifi">--</dd></div>
+      <div><dt>Adresse IP</dt><dd id="sysIp">--</dd></div>
+      <div><dt>MQTT</dt><dd id="sysMqtt">--</dd></div>
+      <div><dt>Firmware</dt><dd id="sysVer">--</dd></div>
+    </dl>
+  </section>
+
   <!-- ── Journal ── -->
   <section class="card" aria-label="Journal des événements">
     <h2>Journal</h2>
     <ul class="log" id="logList"></ul>
   </section>
 
-  <footer><span id="wifiInfo">Wi-Fi —</span><br>ESP32 · mise à jour en direct</footer>
+</div>
+
+<div class="page" id="page-reglages" hidden>
+  <!-- ── Verrou des réglages ── -->
+  <form class="card" id="reglLock" hidden onsubmit="deverrouiller();return false">
+    <h2>Réglages protégés</h2>
+    <p class="hint">Saisis le mot de passe pour modifier le Wi-Fi, MQTT ou la position.</p>
+    <div class="field"><label for="mdpAcces">Mot de passe</label><input type="password" id="mdpAcces" autocomplete="current-password" maxlength="32"></div>
+    <p class="msg err" id="lockMsg" role="alert"></p>
+    <button class="btn b-save" type="submit">Déverrouiller</button>
+  </form>
+
+  <!-- ── Formulaire des réglages ── -->
+  <form id="reglForm" hidden onsubmit="enregistrerReglages(event)" autocomplete="off">
+    <div class="alert" id="apBanner" hidden>Tu es connecté au point d'accès de secours : le Wi-Fi habituel est injoignable. Corrige-le ci-dessous puis enregistre.</div>
+    <div class="alert" id="noPassBanner" hidden>Aucun mot de passe : toute personne du réseau peut modifier ces réglages. Définis-en un tout en bas.</div>
+
+    <section class="card" aria-label="Wi-Fi">
+      <h2>Wi-Fi</h2>
+      <div class="field"><label for="fSsid">Nom du réseau (SSID)</label><input type="text" id="fSsid" maxlength="32" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
+      <div class="field"><label for="fWifiPass">Mot de passe</label><input type="password" id="fWifiPass" maxlength="63" autocomplete="new-password"><small id="wifiPassHint"></small></div>
+    </section>
+
+    <section class="card" aria-label="MQTT">
+      <h2>MQTT / Home Assistant</h2>
+      <label class="chk"><input type="checkbox" id="fMqttOn" onchange="majMqttChamps()"><span>MQTT activé</span></label>
+      <div id="mqttChamps">
+        <div class="two">
+          <div class="field"><label for="fMqttHost">Serveur</label><input type="text" id="fMqttHost" maxlength="63" placeholder="192.168.1.10" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
+          <div class="field"><label for="fMqttPort">Port</label><input type="number" id="fMqttPort" min="1" max="65535" inputmode="numeric"></div>
+        </div>
+        <div class="field"><label for="fMqttUser">Utilisateur</label><input type="text" id="fMqttUser" maxlength="32" autocapitalize="none" autocorrect="off" spellcheck="false"><small>Vide = broker sans identifiants.</small></div>
+        <div class="field"><label for="fMqttPass">Mot de passe</label><input type="password" id="fMqttPass" maxlength="63" autocomplete="new-password"><small id="mqttPassHint"></small></div>
+      </div>
+    </section>
+
+    <section class="card" aria-label="Position">
+      <h2>Position géographique</h2>
+      <div class="two">
+        <div class="field"><label for="fLat">Latitude</label><input type="number" id="fLat" step="any" min="-90" max="90" inputmode="decimal"></div>
+        <div class="field"><label for="fLon">Longitude</label><input type="number" id="fLon" step="any" min="-180" max="180" inputmode="decimal"></div>
+      </div>
+      <p class="hint">Sert au calcul du lever et du coucher du soleil. Astuce : clic droit sur un point de Google Maps pour copier ses coordonnées. Appliqué immédiatement, sans redémarrage.</p>
+    </section>
+
+    <section class="card" aria-label="Sécurité">
+      <h2>Mot de passe de ces réglages</h2>
+      <div class="field"><label for="fWebPass">Nouveau mot de passe</label><input type="password" id="fWebPass" maxlength="32" autocomplete="new-password"><small>6 à 32 caractères, sans accents. Vide = inchangé.</small></div>
+      <div class="field"><label for="fWebPass2">Confirmation</label><input type="password" id="fWebPass2" maxlength="32" autocomplete="new-password"></div>
+      <p class="hint">La page n'est pas chiffrée (HTTP) : ce mot de passe protège contre les erreurs et les curieux, pas contre une écoute du réseau local.</p>
+    </section>
+
+    <p class="msg" id="reglMsg" role="status"></p>
+    <button class="btn b-save" type="submit">Enregistrer</button>
+    <p class="hint center">Un changement de Wi-Fi ou de MQTT redémarre la carte (porte immobile uniquement).</p>
+
+    <section class="card" aria-label="Maintenance">
+      <h2>Maintenance</h2>
+      <button class="btn b-ghost" type="button" onclick="redemarrer()"><svg class="ico"><use href="#i-reset"/></svg>Redémarrer la carte</button>
+    </section>
+  </form>
+
+  <div class="overlay" id="restartOv" hidden>
+    <div class="card">
+      <h2>Redémarrage…</h2>
+      <p class="hint" id="restartTxt">La carte redémarre. Cette page se rechargera toute seule.</p>
+    </div>
+  </div>
+</div>
+
 </main>
+
+<nav class="tabs" aria-label="Onglets">
+  <div class="tabs-in">
+    <a href="#porte" id="nav-porte" aria-current="page"><svg class="ico"><use href="#i-door"/></svg>Porte</a>
+    <a href="#auto" id="nav-auto"><svg class="ico"><use href="#i-cycle"/></svg>Automatisme</a>
+    <a href="#diag" id="nav-diag"><svg class="ico"><use href="#i-pulse"/></svg>Diagnostic</a>
+    <a href="#reglages" id="nav-reglages"><svg class="ico"><use href="#i-sliders"/></svg>Réglages</a>
+  </div>
+</nav>
 
 <script>
 // ── État local ───────────────────────────────────────────────
@@ -466,6 +607,12 @@ function desarmerStop() {
 }
 
 // ── Mode ─────────────────────────────────────────────────────
+const MODES_META = {
+  soleil:     { nom: 'Soleil',     icone: '#i-sunrise' },
+  luminosite: { nom: 'Luminosité', icone: '#i-bulb' },
+  heure_fixe: { nom: 'Heure fixe', icone: '#i-clock' },
+  manuel:     { nom: 'Manuel',     icone: '#i-hand' }
+};
 function afficherMode(mode) {
   modeSelectionne = mode;
   ['soleil', 'luminosite', 'heure_fixe', 'manuel'].forEach(m => {
@@ -473,6 +620,9 @@ function afficherMode(mode) {
     $('panel-' + m).hidden = (m !== mode);
   });
   $('plan').hidden = !(mode === 'soleil' || mode === 'heure_fixe');
+  const meta = MODES_META[mode] || MODES_META.soleil;
+  $('modeIcon').setAttribute('href', meta.icone);
+  $('modeTxt').textContent = 'Mode ' + meta.nom;
   majProgramme();
 }
 function selectionnerMode(mode) {
@@ -635,6 +785,7 @@ function handleMsg(d) {
     $('confLabel').textContent = d.conf_pct < 100 ? d.conf_pct + '%' : 'OK';
   }
   if (d.log) ajouterLog(d.log.msg, d.log.type || 'info');
+  if (d.uptime !== undefined) majSysteme(d);
   majProgramme();
 }
 function majFdc(id, actif) {
@@ -738,12 +889,138 @@ function dessinerGraphique() {
   ctx.fillStyle = '#f4b942'; ctx.fill();
 }
 
+// ── Diagnostic : informations système ────────────────────────
+function dureeTxt(s) {
+  const j = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return (j ? j + ' j ' : '') + (j || h ? h + ' h ' : '') + m + ' min';
+}
+function majSysteme(d) {
+  $('sysUptime').textContent = dureeTxt(d.uptime);
+  $('sysReset').textContent = d.reset || '--';
+  $('sysHeap').textContent = Math.round(d.heap / 1024) + ' Ko';
+  $('sysVer').textContent = d.ver || '--';
+  $('sysIp').textContent = d.ip || '--';
+  $('sysMqtt').textContent = ['Désactivé', 'Déconnecté', 'Connecté'][d.mqtt] || '--';
+  let w = d.rssi ? '« ' + (d.ssid || '?') + ' » · ' + d.rssi + ' dBm' : 'Non connecté';
+  if (d.ap) w += ' · point d\'accès de secours actif';
+  $('sysWifi').textContent = w;
+}
+
+// ── Onglets ──────────────────────────────────────────────────
+const PAGES = ['porte', 'auto', 'diag', 'reglages'];
+function afficherPage(p) {
+  PAGES.forEach(n => {
+    $('page-' + n).hidden = (n !== p);
+    if (n === p) $('nav-' + n).setAttribute('aria-current', 'page');
+    else $('nav-' + n).removeAttribute('aria-current');
+  });
+  window.scrollTo(0, 0);
+  try { localStorage.setItem('onglet', p); } catch (e) {}
+  if (p === 'diag') dessinerGraphique();      // le canvas n'a pas de taille tant qu'il est masqué
+  if (p === 'reglages') chargerReglages();
+}
+function pageInitiale() {
+  const h = location.hash.slice(1);
+  if (PAGES.includes(h)) return h;
+  let m = null;
+  try { m = localStorage.getItem('onglet'); } catch (e) {}
+  return PAGES.includes(m) ? m : 'porte';
+}
+window.addEventListener('hashchange', () => afficherPage(PAGES.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'porte'));
+
+// ── Réglages : Wi-Fi, MQTT, position, mot de passe ───────────
+// Le mot de passe saisi reste en mémoire (jamais stocké) et accompagne chaque appel.
+let mdpReglages = '';
+async function api(url, champs) {
+  const r = await fetch(url, { method: 'POST', body: new URLSearchParams(Object.assign({ mdp: mdpReglages }, champs)) });
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  return { status: r.status, ok: r.ok, j };
+}
+function montrerVerrou(st, msg) {
+  $('reglLock').hidden = false;
+  $('reglForm').hidden = true;
+  $('lockMsg').textContent = msg || (st === 429 ? 'Trop d\'essais : patiente une minute.' : (mdpReglages ? 'Mot de passe incorrect.' : ''));
+}
+function deverrouiller() { mdpReglages = $('mdpAcces').value; $('mdpAcces').value = ''; chargerReglages(); }
+function majMqttChamps() {
+  const on = $('fMqttOn').checked;
+  $('mqttChamps').style.opacity = on ? '1' : '.45';
+  $('mqttChamps').querySelectorAll('input').forEach(i => i.disabled = !on);
+}
+async function chargerReglages() {
+  try {
+    const r = await api('/api/reseau/lire', {});
+    if (r.status === 401 || r.status === 429) return montrerVerrou(r.status);
+    if (!r.ok) throw new Error(r.status);
+    const c = r.j;
+    $('fSsid').value = c.wifi_ssid || '';
+    $('fWifiPass').value = '';
+    $('wifiPassHint').textContent = c.wifi_pass_set ? 'Laisser vide = inchangé.' : 'Réseau ouvert (aucun mot de passe).';
+    $('fMqttOn').checked = !!c.mqtt_on;
+    $('fMqttHost').value = c.mqtt_host || '';
+    $('fMqttPort').value = c.mqtt_port || 1883;
+    $('fMqttUser').value = c.mqtt_user || '';
+    $('fMqttPass').value = '';
+    $('mqttPassHint').textContent = c.mqtt_pass_set ? 'Laisser vide = inchangé.' : 'Aucun mot de passe enregistré.';
+    $('fLat').value = c.lat; $('fLon').value = c.lon;
+    $('fWebPass').value = ''; $('fWebPass2').value = '';
+    $('apBanner').hidden = !c.ap;
+    $('noPassBanner').hidden = !!c.web_pass_set;
+    majMqttChamps();
+    $('reglLock').hidden = true;
+    $('reglForm').hidden = false;
+  } catch (e) { montrerVerrou(0, 'Carte injoignable. Réessaie.'); }
+}
+function msgReglages(txt, erreur) { const m = $('reglMsg'); m.textContent = txt; m.className = 'msg ' + (erreur ? 'err' : 'ok'); }
+async function enregistrerReglages(ev) {
+  ev.preventDefault();
+  const nv = $('fWebPass').value;
+  if (nv !== $('fWebPass2').value) return msgReglages('Les deux mots de passe ne correspondent pas.', true);
+  const f = {
+    wifi_ssid: $('fSsid').value, wifi_pass: $('fWifiPass').value,
+    mqtt_on: $('fMqttOn').checked ? '1' : '0', mqtt_host: $('fMqttHost').value.trim(), mqtt_port: $('fMqttPort').value,
+    mqtt_user: $('fMqttUser').value, mqtt_pass: $('fMqttPass').value,
+    lat: $('fLat').value, lon: $('fLon').value, web_pass_new: nv
+  };
+  msgReglages('Enregistrement…', false);
+  try {
+    const r = await api('/api/reseau/ecrire', f);
+    if (r.status === 401 || r.status === 429) return montrerVerrou(r.status);
+    if (!r.ok || !r.j.ok) return msgReglages(r.j.err || 'Échec de l\'enregistrement.', true);
+    if (nv) mdpReglages = nv;
+    if (r.j.restart) montrerRedemarrage();
+    else { await chargerReglages(); msgReglages('Enregistré.', false); }
+  } catch (e) { msgReglages('Carte injoignable.', true); }
+}
+async function redemarrer() {
+  if (!confirm('Redémarrer la carte maintenant ?')) return;
+  try {
+    const r = await api('/api/redemarrer', {});
+    if (r.status === 401 || r.status === 429) return montrerVerrou(r.status);
+    if (r.ok) montrerRedemarrage(); else msgReglages(r.j.err || 'Échec.', true);
+  } catch (e) { msgReglages('Carte injoignable.', true); }
+}
+function montrerRedemarrage() {
+  $('restartOv').hidden = false;
+  let n = 0;
+  const t = setInterval(async () => {
+    n++;
+    try {
+      const r = await fetch('/manifest.json', { cache: 'no-store' });
+      if (r.ok && n > 3) { clearInterval(t); location.reload(); }
+    } catch (e) {}
+    if (n === 25) $('restartTxt').textContent = 'La carte met du temps à revenir. Si le Wi-Fi a changé, elle a peut-être une nouvelle adresse IP (à chercher dans Home Assistant ou sur ta box). Sinon, connecte-toi au Wi-Fi « Poulailler-Config » puis ouvre http://192.168.4.1';
+  }, 2000);
+}
+
 window.addEventListener('load', () => {
   afficherOffset('valOffsetOuv', offsetOuv);
   afficherOffset('valOffsetFer', offsetFer);
   afficherOffset('valOffsetHfxOuv', 0);
   afficherOffset('valOffsetHfxFer', 0);
   afficherMode('soleil');
+  afficherPage(pageInitiale());
   dessinerGraphique();
   connectWS();
 });
@@ -765,7 +1042,7 @@ void wsBroadcastState() {
   if (heureOk) {
     s = calculSoleil(
       timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
-      LATITUDE, LONGITUDE
+      reseau.lat, reseau.lon
     );
   }
 
@@ -801,8 +1078,12 @@ void wsBroadcastState() {
     ssidJson[j] = '\0';
   }
 
-  char buf[900];
-  snprintf(buf, sizeof(buf),
+  char ipStr[16] = "";
+  if (WiFi.status() == WL_CONNECTED) strlcpy(ipStr, WiFi.localIP().toString().c_str(), sizeof(ipStr));
+  int etatMqtt = !reseau.mqttOn ? 0 : (mqtt.connected() ? 2 : 1);
+
+  char buf[1100];
+  int n = snprintf(buf, sizeof(buf),
     "{\"heure\":\"%s\","
     "\"porte\":\"%s\","
     "\"mode\":\"%s\","
@@ -825,7 +1106,14 @@ void wsBroadcastState() {
     "\"rssi\":%d,"
     "\"ssid\":\"%s\","
     "\"fdc_ouv\":%s,"
-    "\"fdc_fer\":%s"
+    "\"fdc_fer\":%s,"
+    "\"uptime\":%lu,"
+    "\"heap\":%u,"
+    "\"reset\":\"%s\","
+    "\"ver\":\"%s\","
+    "\"mqtt\":%d,"
+    "\"ap\":%s,"
+    "\"ip\":\"%s\""
     "}",
     heureStr,
     etatVersStr(etatPorte),
@@ -849,8 +1137,16 @@ void wsBroadcastState() {
     (WiFi.status() == WL_CONNECTED) ? WiFi.RSSI() : 0,
     ssidJson,
     digitalRead(PIN_FDC_OUV) == LOW  ? "true" : "false",
-    digitalRead(PIN_FDC_FER) == LOW  ? "true" : "false"
+    digitalRead(PIN_FDC_FER) == LOW  ? "true" : "false",
+    millis() / 1000UL,
+    (unsigned)ESP.getFreeHeap(),
+    causeRedemarrage(),
+    FIRMWARE_VERSION,
+    etatMqtt,
+    apActif ? "true" : "false",
+    ipStr
   );
+  if (n < 0 || n >= (int)sizeof(buf)) { Serial.printf("[WS] État trop long (%d) — non envoyé\n", n); return; }
   ws.textAll(buf);
 }
 
@@ -930,6 +1226,167 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
   }
 }
 
+// ── API des réglages réseau ─────────────────────────────────
+// Appels POST (formulaire) protégés par le mot de passe des réglages, s'il est défini.
+// Ces handlers tournent dans la tâche réseau : ils valident et copient, puis loop() applique
+// (NVS, redémarrage) via fileReseau, porte immobile.
+static unsigned long dernierEchecAcces = 0;
+static uint8_t       echecsAcces       = 0;
+
+static bool egalConstant(const char* a, const char* b) {   // comparaison à durée constante
+  size_t la = strlen(a), lb = strlen(b);
+  unsigned char d = (la != lb);
+  for (size_t i = 0; i < (la < lb ? la : lb); i++) d |= (unsigned char)(a[i] ^ b[i]);
+  return d == 0;
+}
+
+// 0 = accès accordé, 1 = refusé, 2 = trop d'essais (blocage 60 s après 5 échecs)
+static int verifierAcces(AsyncWebServerRequest* req) {
+  if (reseau.webPass[0] == '\0') return 0;
+  if (echecsAcces >= 5) {
+    if (millis() - dernierEchecAcces < 60000UL) return 2;
+    echecsAcces = 0;
+  }
+  const AsyncWebParameter* p = req->getParam("mdp", true);
+  if (p && egalConstant(p->value().c_str(), reseau.webPass)) { echecsAcces = 0; return 0; }
+  if (p && p->value().length() > 0) { echecsAcces++; dernierEchecAcces = millis(); }   // une saisie vide n'est pas un essai
+  return 1;
+}
+
+static void repondreErreur(AsyncWebServerRequest* req, int code, const char* msg) {
+  String r = "{\"ok\":false,\"err\":\""; r += msg; r += "\"}";
+  req->send(code, "application/json", r);
+}
+
+static bool refuserSiBloque(AsyncWebServerRequest* req) {
+  int acces = verifierAcces(req);
+  if (acces == 0) return false;
+  repondreErreur(req, acces == 2 ? 429 : 401, acces == 2 ? "Trop d'essais" : "Mot de passe requis");
+  return true;
+}
+
+static bool texteSain(const String& v, size_t maxLen) {   // pas de caractère de contrôle
+  if (v.length() > maxLen) return false;
+  for (size_t i = 0; i < v.length(); i++) { unsigned char c = v[i]; if (c < 0x20 || c == 0x7F) return false; }
+  return true;
+}
+static bool hoteValide(const String& v) {
+  if (v.length() < 1 || v.length() > 63) return false;
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if (!(isalnum((unsigned char)c) || c == '.' || c == '-' || c == '_')) return false;
+  }
+  return true;
+}
+static bool lireNombre(const String& v, float mn, float mx, float& out) {
+  String t = v; t.replace(',', '.');
+  char* fin; float f = strtof(t.c_str(), &fin);
+  if (t.length() == 0 || fin == t.c_str() || *fin != '\0' || isnan(f) || f < mn || f > mx) return false;
+  out = f; return true;
+}
+
+// Remplit « n » (copie de la config courante) avec les champs reçus ; retourne un message d'erreur ou nullptr
+static const char* lireFormulaire(AsyncWebServerRequest* req, ReseauCfg& n) {
+  auto champ = [&](const char* k, String& out) -> bool {
+    const AsyncWebParameter* p = req->getParam(k, true);
+    if (!p) return false;
+    out = p->value(); return true;
+  };
+  String v, mdp;
+
+  if (champ("wifi_ssid", v)) {
+    if (v.length() < 1 || v.length() > 32 || !texteSain(v, 32)) return "Nom du Wi-Fi : 1 à 32 caractères.";
+    bool mdpDonne = champ("wifi_pass", mdp) && mdp.length() > 0;
+    if (mdpDonne) {
+      if (mdp.length() < 8 || mdp.length() > 63 || !texteSain(mdp, 63)) return "Mot de passe Wi-Fi : 8 à 63 caractères.";
+      strlcpy(n.wifiPass, mdp.c_str(), sizeof(n.wifiPass));
+    } else if (v != reseau.wifiSsid) {
+      n.wifiPass[0] = '\0';          // nouveau réseau sans mot de passe saisi : réseau ouvert
+    }
+    strlcpy(n.wifiSsid, v.c_str(), sizeof(n.wifiSsid));
+  }
+
+  if (champ("mqtt_on", v)) n.mqttOn = (v == "1");
+  if (champ("mqtt_host", v)) {
+    if (v.length() > 0) {
+      if (!hoteValide(v)) return "Serveur MQTT : adresse invalide.";
+      strlcpy(n.mqttHost, v.c_str(), sizeof(n.mqttHost));
+    } else if (n.mqttOn) return "Serveur MQTT requis.";
+  }
+  if (champ("mqtt_port", v)) {
+    float f;
+    if (!lireNombre(v, 1, 65535, f) || f != (int)f) return "Port MQTT : entre 1 et 65535.";
+    n.mqttPort = (int)f;
+  }
+  if (champ("mqtt_user", v)) {
+    if (!texteSain(v, 32)) return "Utilisateur MQTT : 32 caractères maximum.";
+    bool mdpDonne = champ("mqtt_pass", mdp) && mdp.length() > 0;
+    if (mdpDonne && (!texteSain(mdp, 63))) return "Mot de passe MQTT : 63 caractères maximum.";
+    if (v.length() == 0) {             // pas d'utilisateur : broker anonyme
+      n.mqttUser[0] = '\0'; n.mqttPass[0] = '\0';
+    } else {
+      if (mdpDonne) strlcpy(n.mqttPass, mdp.c_str(), sizeof(n.mqttPass));
+      else if (v != reseau.mqttUser) n.mqttPass[0] = '\0';
+      strlcpy(n.mqttUser, v.c_str(), sizeof(n.mqttUser));
+    }
+  }
+
+  float f;
+  if (champ("lat", v)) { if (!lireNombre(v, -90, 90, f))   return "Latitude : entre -90 et 90.";   n.lat = f; }
+  if (champ("lon", v)) { if (!lireNombre(v, -180, 180, f)) return "Longitude : entre -180 et 180."; n.lon = f; }
+
+  if (champ("web_pass_new", v) && v.length() > 0) {
+    bool ascii = true;
+    for (size_t i = 0; i < v.length(); i++) { unsigned char c = v[i]; if (c < 0x20 || c > 0x7E) ascii = false; }
+    if (v.length() < MDP_WEB_MIN || v.length() > 32 || !ascii) return "Mot de passe : 6 à 32 caractères, sans accents.";
+    strlcpy(n.webPass, v.c_str(), sizeof(n.webPass));
+  }
+  return nullptr;
+}
+
+static void routesReglages() {
+  // Lecture : jamais de mot de passe renvoyé, seulement s'il est défini
+  server.on("/api/reseau/lire", HTTP_POST, [](AsyncWebServerRequest* req) {
+    if (refuserSiBloque(req)) return;
+    JsonDocument doc;
+    doc["wifi_ssid"]      = reseau.wifiSsid;
+    doc["wifi_pass_set"]  = reseau.wifiPass[0] != '\0';
+    doc["mqtt_on"]        = reseau.mqttOn;
+    doc["mqtt_host"]      = reseau.mqttHost;
+    doc["mqtt_port"]      = reseau.mqttPort;
+    doc["mqtt_user"]      = reseau.mqttUser;
+    doc["mqtt_pass_set"]  = reseau.mqttPass[0] != '\0';
+    doc["lat"]            = reseau.lat;
+    doc["lon"]            = reseau.lon;
+    doc["web_pass_set"]   = reseau.webPass[0] != '\0';
+    doc["ap"]             = apActif;
+    String out; serializeJson(doc, out);
+    req->send(200, "application/json", out);
+  });
+
+  server.on("/api/reseau/ecrire", HTTP_POST, [](AsyncWebServerRequest* req) {
+    if (refuserSiBloque(req)) return;
+    ReseauCfg n = reseau;
+    const char* err = lireFormulaire(req, n);
+    if (err) { repondreErreur(req, 400, err); return; }
+    bool wifiChg = strcmp(n.wifiSsid, reseau.wifiSsid) != 0 || strcmp(n.wifiPass, reseau.wifiPass) != 0;
+    bool mqttChg = n.mqttOn != reseau.mqttOn || n.mqttPort != reseau.mqttPort
+                || strcmp(n.mqttHost, reseau.mqttHost) != 0 || strcmp(n.mqttUser, reseau.mqttUser) != 0
+                || strcmp(n.mqttPass, reseau.mqttPass) != 0;
+    if (fileReseau == nullptr || xQueueSend(fileReseau, &n, 0) != pdTRUE) {
+      repondreErreur(req, 409, "Une modification est déjà en cours, réessaie.");
+      return;
+    }
+    req->send(200, "application/json", (wifiChg || mqttChg) ? "{\"ok\":true,\"restart\":true}" : "{\"ok\":true,\"restart\":false}");
+  });
+
+  server.on("/api/redemarrer", HTTP_POST, [](AsyncWebServerRequest* req) {
+    if (refuserSiBloque(req)) return;
+    demanderRedemarrage();    // exécuté par loop() quand la porte est immobile
+    req->send(200, "application/json", "{\"ok\":true}");
+  });
+}
+
 // ── Initialisation — à appeler dans setup() après WiFi ───────
 void setupWebServer() {
   fileWeb = xQueueCreate(WS_FILE_LEN, sizeof(MessageWeb));
@@ -959,6 +1416,8 @@ void setupWebServer() {
       "{\"src\":\"/icon-512.png\",\"sizes\":\"512x512\",\"type\":\"image/png\",\"purpose\":\"any maskable\"}]}");
   });
 
+  routesReglages();
+
   server.begin();
-  Serial.printf("[WEB] http://%s\n", WiFi.localIP().toString().c_str());
+  Serial.printf("[WEB] http://%s\n", (apActif ? WiFi.softAPIP() : WiFi.localIP()).toString().c_str());
 }

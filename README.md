@@ -118,9 +118,10 @@ Le moteur est coupé au début de la mise à jour et l'ESP32 redémarre à la fi
 
 ## Configuration
 
-### Identifiants et position : `secrets.h`
+### Identifiants et position : `secrets.h` (valeurs par défaut)
 
 Les identifiants WiFi / MQTT et les coordonnées GPS ne sont **pas** dans le code : ils sont lus depuis `porte_poulailler/secrets.h`, un fichier ignoré par git pour ne jamais publier tes mots de passe.
+Ce sont les **valeurs d'usine** : une fois la carte en service, tout se modifie depuis l'onglet **Réglages** de la page web (voir [Interface web](#interface-web)) sans recompiler. Les valeurs enregistrées sont stockées en NVS et prennent le pas sur `secrets.h`, qui reste le **repli** si le Wi-Fi enregistré est injoignable.
 
 1. Copier le modèle :
    ```bash
@@ -137,6 +138,9 @@ Les identifiants WiFi / MQTT et les coordonnées GPS ne sont **pas** dans le cod
 
    #define SECRET_LATITUDE       48.8566          // Coordonnées GPS pour calcul soleil
    #define SECRET_LONGITUDE      2.3522
+
+   // Facultatif : mot de passe du point d'accès de secours (8 caractères minimum, défaut : "poulailler")
+   // #define SECRET_AP_PASSWORD "mon_mot_de_passe"
    ```
 3. Compiler normalement : `secrets.h` apparaît comme un onglet dans l'IDE Arduino.
 
@@ -146,8 +150,6 @@ Les identifiants WiFi / MQTT et les coordonnées GPS ne sont **pas** dans le cod
 ### Autres paramètres dans `porte_poulailler.ino`
 
 ```cpp
-#define MQTT_ENABLED  true   // true = MQTT actif, false = désactivé
-const int   MQTT_PORT = 1883;
 const char* TZ_INFO   = "CET-1CEST,M3.5.0,M10.5.0/3";  // Fuseau horaire (France)
 ```
 
@@ -264,12 +266,22 @@ En modes automatiques, une commande manuelle suspend l'automatisme jusqu'à la p
 Accessible à `http://[IP_ESP32]` depuis n'importe quel navigateur sur le réseau local.
 IP visible au démarrage de l'ESP32 dans le moniteur Arduino.
 
-- État porte temps réel + heure ESP32
-- Boutons Ouvrir / Fermer / Stop d'urgence (double confirmation)
-- 4 onglets de configuration des modes
-- Graphique courant moteur
-- Journal des événements (20 entrées)
-- Bouton Réinitialiser l'erreur (visible uniquement en état erreur)
+La page est organisée en **4 onglets** (barre en bas de l'écran, lien direct possible : `#porte`, `#auto`, `#diag`, `#reglages`) :
+
+| Onglet | Contenu |
+|---|---|
+| **Porte** | État temps réel + heure ESP32, mode actif et prochaine action, boutons Ouvrir / Fermer / Stop d'urgence (double confirmation), bouton Réinitialiser l'erreur (visible uniquement en état erreur) |
+| **Automatisme** | Choix du mode (Soleil, Luminosité, Heure fixe, Manuel), décalages, seuils lux, heures fixes, programme du jour |
+| **Diagnostic** | Fins de course, luminosité, courant moteur + graphique, système (durée de fonctionnement, cause du dernier démarrage, mémoire libre, Wi-Fi, IP, état MQTT, version), journal des événements (20 entrées) |
+| **Réglages** | Wi-Fi (SSID, mot de passe), MQTT (serveur, port, utilisateur, mot de passe, activation), position GPS, mot de passe de l'onglet, bouton Redémarrer |
+
+### Onglet Réglages
+
+- **Position GPS** : appliquée immédiatement (recalcul du lever/coucher). Astuce : clic droit sur Google Maps pour copier les coordonnées.
+- **Wi-Fi / MQTT** : enregistrés en NVS, la carte **redémarre** pour les appliquer (jamais pendant un mouvement : le redémarrage attend que la porte soit immobile). Un champ mot de passe laissé vide conserve l'ancien.
+- **Les mots de passe ne sont jamais renvoyés** au navigateur.
+- **Mot de passe de l'onglet** : tant qu'aucun n'est défini, les réglages sont ouverts à tout le réseau local (une bannière le rappelle). Une fois défini (6 à 32 caractères ASCII), il est demandé pour lire et modifier les réglages ; 5 erreurs bloquent les essais pendant 1 minute. La page reste en HTTP non chiffré : c'est une protection contre les erreurs et les curieux, pas contre une écoute du réseau local. Les commandes de la porte (onglet Porte) ne sont pas protégées. **Mot de passe oublié** : effacer la NVS (`esptool.py erase_region 0x9000 0x5000`) puis téléverser à nouveau — tous les réglages repartent aux valeurs de `secrets.h`.
+- **Filet de sécurité Wi-Fi** : au démarrage, la carte essaie le Wi-Fi enregistré, puis celui de `secrets.h`, puis ouvre son propre point d'accès **`Poulailler-Config`** (mot de passe `poulailler` par défaut, `SECRET_AP_PASSWORD` pour le changer) : se connecter dessus puis ouvrir `http://192.168.4.1` pour corriger les réglages. Sans internet, il n'y a pas d'heure fiable : les modes Soleil et Heure fixe sont inactifs, le mode Luminosité continue de fonctionner. Le point d'accès se coupe tout seul dès que le Wi-Fi revient (nouvelle tentative toutes les 5 minutes).
 
 ---
 
@@ -329,7 +341,8 @@ void loop() {
 | `secrets.h: No such file or directory` | Créer `secrets.h` à partir de `secrets.h.example` |
 | Port réseau `poulailler` absent dans l'IDE | Vérifier que l'ESP32 est sur le même réseau ; à défaut, téléverser par USB |
 | `[INIT] Position inconnue` | Déplacer la porte sur un FDC manuellement puis redémarrer |
-| Interface web inaccessible | Vérifier l'IP dans le moniteur série (115200 bauds) |
+| Interface web inaccessible | Vérifier l'IP dans le moniteur série (115200 bauds) ; sinon se connecter au Wi-Fi `Poulailler-Config` puis `http://192.168.4.1` |
+| Réglages Wi-Fi erronés, carte injoignable | Elle retombe sur `secrets.h`, puis sur le point d'accès `Poulailler-Config` (voir Interface web) |
 
 ---
 
@@ -461,9 +474,10 @@ The motor is switched off when the update starts and the ESP32 reboots at the en
 
 ## Configuration
 
-### Credentials and location: `secrets.h`
+### Credentials and location: `secrets.h` (default values)
 
 WiFi / MQTT credentials and GPS coordinates are **not** in the code: they are read from `porte_poulailler/secrets.h`, a git-ignored file so your passwords are never published.
+These are the **factory values**: once the board is running, everything can be changed from the **Settings** tab of the web page (see [Web interface](#web-interface)) without recompiling. Saved values are stored in NVS and take precedence over `secrets.h`, which remains the **fallback** if the saved WiFi is unreachable.
 
 1. Copy the template:
    ```bash
@@ -480,6 +494,9 @@ WiFi / MQTT credentials and GPS coordinates are **not** in the code: they are re
 
    #define SECRET_LATITUDE       48.8566          // GPS coordinates for sun calculation
    #define SECRET_LONGITUDE      2.3522
+
+   // Optional: fallback access point password (8 characters minimum, default: "poulailler")
+   // #define SECRET_AP_PASSWORD "my_password"
    ```
 3. Compile as usual: `secrets.h` shows up as a tab in the Arduino IDE.
 
@@ -489,8 +506,6 @@ WiFi / MQTT credentials and GPS coordinates are **not** in the code: they are re
 ### Other parameters in `porte_poulailler.ino`
 
 ```cpp
-#define MQTT_ENABLED  true   // true = MQTT active, false = disabled
-const int   MQTT_PORT = 1883;
 const char* TZ_INFO   = "CET-1CEST,M3.5.0,M10.5.0/3";  // Time zone (France)
 ```
 
@@ -606,12 +621,22 @@ In automatic modes, a manual command suspends automation until the next natural 
 
 Accessible at `http://[ESP32_IP]` from any browser on the local network.
 
-- Real-time door status + ESP32 clock
-- Open / Close / Emergency Stop buttons (double confirmation)
-- 4 mode configuration tabs
-- Motor current graph
-- Event log (20 entries)
-- Reset Error button (visible only in error state)
+The page is organised in **4 tabs** (bar at the bottom of the screen, direct links: `#porte`, `#auto`, `#diag`, `#reglages`):
+
+| Tab | Content |
+|---|---|
+| **Door** | Real-time status + ESP32 clock, active mode and next action, Open / Close / Emergency Stop buttons (double confirmation), Reset Error button (visible only in error state) |
+| **Automation** | Mode selection (Sun, Light, Fixed time, Manual), offsets, lux thresholds, fixed times, daily schedule |
+| **Diagnostics** | Limit switches, light level, motor current + graph, system (uptime, last boot cause, free memory, WiFi, IP, MQTT state, version), event log (20 entries) |
+| **Settings** | WiFi (SSID, password), MQTT (server, port, user, password, on/off), GPS location, tab password, Restart button |
+
+### Settings tab
+
+- **GPS location**: applied immediately (sunrise/sunset recalculated). Tip: right-click on Google Maps to copy coordinates.
+- **WiFi / MQTT**: saved in NVS, the board **restarts** to apply them (never during a movement: the restart waits until the door is idle). A password field left empty keeps the old one.
+- **Passwords are never sent back** to the browser.
+- **Tab password**: until one is set, settings are open to the whole local network (a banner reminds you). Once set (6 to 32 ASCII characters), it is required to read and change settings; 5 wrong attempts block further tries for 1 minute. The page stays plain HTTP: this protects against mistakes and casual snooping, not against sniffing on the local network. Door commands (Door tab) are not protected. **Forgotten password**: erase NVS (`esptool.py erase_region 0x9000 0x5000`) and upload again — all settings go back to the `secrets.h` values.
+- **WiFi safety net**: at boot the board tries the saved WiFi, then the `secrets.h` one, then opens its own access point **`Poulailler-Config`** (password `poulailler` by default, `SECRET_AP_PASSWORD` to change it): connect to it and open `http://192.168.4.1` to fix the settings. Without internet there is no reliable time: Sun and Fixed-time modes are idle, Light mode keeps working. The access point shuts down by itself once WiFi is back (retry every 5 minutes).
 
 ---
 
@@ -671,7 +696,8 @@ void loop() {
 | `secrets.h: No such file or directory` | Create `secrets.h` from `secrets.h.example` |
 | `poulailler` network port missing in the IDE | Make sure the ESP32 is on the same network; otherwise upload over USB |
 | `[INIT] Position inconnue` | Manually move door onto a limit switch then reboot |
-| Web interface unreachable | Check IP in serial monitor (115200 baud) |
+| Web interface unreachable | Check IP in serial monitor (115200 baud); otherwise join the `Poulailler-Config` WiFi then `http://192.168.4.1` |
+| Wrong WiFi settings, board unreachable | It falls back to `secrets.h`, then to the `Poulailler-Config` access point (see Web Interface) |
 
 ---
 
