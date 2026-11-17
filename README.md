@@ -7,9 +7,10 @@ Intégration Home Assistant possible via MQTT, interface web mobile embarquée, 
 Le projet peut fonctionner avec n'importe quel autre bricolage de porte DIY.
 
 <p align="center">
-  <img src="docs/interface-porte-fermee-soleil.png" alt="Interface web : porte fermée, mode Soleil" width="31%">
-  <img src="docs/interface-ouverture-luminosite.png" alt="Interface web : ouverture en cours, mode Luminosité" width="31%">
-  <img src="docs/interface-erreur-heure-fixe.png" alt="Interface web : erreur, mode Heure fixe" width="31%">
+  <img src="docs/interface-porte.png" alt="Interface web, onglet Porte : porte fermée, mode Soleil" width="24%">
+  <img src="docs/interface-automatisme.png" alt="Interface web, onglet Automatisme : mode Luminosité" width="24%">
+  <img src="docs/interface-diagnostic.png" alt="Interface web, onglet Diagnostic : capteurs, courant moteur et système" width="24%">
+  <img src="docs/interface-reglages.png" alt="Interface web, onglet Réglages : Wi-Fi et MQTT" width="24%">
 </p>
 
 ---
